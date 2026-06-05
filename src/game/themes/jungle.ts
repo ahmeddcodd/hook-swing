@@ -10,6 +10,8 @@ export const JungleTheme = {
   assets: {
     cover: { key: 'cover', path: 'game_ui/cover.png' },
     playButton: { key: 'play_button', path: 'game_ui/play_button.png' },
+    // SFX played when the character launches off the starting platform.
+    jumpSound: { key: 'jump_sound', path: 'sound_effects/jump_sound.ogg' },
     // Only layers 1 & 2 are background art. Layer 3 is reserved for the
     // gameplay foreground (player + hooks/vines), added in a later phase.
     background: [

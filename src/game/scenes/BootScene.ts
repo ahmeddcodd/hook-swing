@@ -29,6 +29,9 @@ export class BootScene extends Phaser.Scene {
     this.load.image(cover.key, cover.path)
     this.load.image(playButton.key, playButton.path)
 
+    // Sound effects.
+    this.load.audio(JungleTheme.assets.jumpSound.key, JungleTheme.assets.jumpSound.path)
+
     // Parallax layers for the game screen.
     for (const layer of background) {
       this.load.image(layer.key, layer.path)

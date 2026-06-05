@@ -247,6 +247,7 @@ export class GameScene extends Phaser.Scene {
 
   /** Leave the platform: play the jump launch animation and start free flight. */
   private launch() {
+    this.sound.play(JungleTheme.assets.jumpSound.key)
     this.setJumpPose(true)
     this.vx = LAUNCH_VX
     this.vy = LAUNCH_VY
