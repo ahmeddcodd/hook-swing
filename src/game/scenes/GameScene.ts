@@ -134,12 +134,33 @@ export class GameScene extends Phaser.Scene {
   /** World position the character starts (and respawns) at. */
   private startX = 0
   private startY = 0
+  /** Win-state: true once the level is completed (guards gameplay input). */
+  private won = false
+  /** Guards against double-tapping the replay button into stacked restarts. */
+  private restarting = false
+  /** Screen-pinned overlay objects shown on win (cleaned up on restart). */
+  private winOverlay: Phaser.GameObjects.GameObject[] = []
 
   constructor() {
     super('GameScene')
   }
 
   create() {
+    // Reset all run-state. Phaser's scene.restart() reuses the SAME instance, so
+    // class fields keep their previous values — without this, a replay would
+    // start with state=Landing/won=true and the character would never be planted.
+    this.state = MoveState.Idle
+    this.holding = false
+    this.vx = 0
+    this.vy = 0
+    this.attachedHook = null
+    this.angle = 0
+    this.angVel = 0
+    this.swingForward = true
+    this.won = false
+    this.restarting = false
+    this.winOverlay = []
+
     // Background layers as screen-pinned TileSprites (scrollFactor 0). Each uses
     // a runtime [original|mirrored] texture so tiling is perfectly seamless (no
     // edge-mismatch seam lines). They scroll at different speeds for parallax
@@ -234,6 +255,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onPointerDown() {
+    // Ignore gameplay taps once the level is won (the win overlay owns input).
+    if (this.won) return
     this.holding = true
     if (this.state === MoveState.Idle) {
       this.launch()
@@ -241,6 +264,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onPointerUp() {
+    if (this.won) return
     this.holding = false
     if (this.state === MoveState.Swinging) {
       this.release()
@@ -297,12 +321,107 @@ export class GameScene extends Phaser.Scene {
       this.character.setPosition(this.landingX, this.landingY)
     })
 
-    // Smoothly pan the camera to center the temple on screen.
+    // Smoothly pan the camera to center the temple on screen, then reveal the
+    // win overlay so the player can replay.
     this.tweens.add({
       targets: this.cameras.main,
       scrollX: this.temple.x - GAME_WIDTH / 2,
       duration: 600,
       ease: 'Sine.easeInOut',
+      onComplete: () => this.showWinOverlay(),
+    })
+  }
+
+  /** Reveal the "YOU WIN!" overlay with a tap-to-replay button. */
+  private showWinOverlay() {
+    this.won = true
+
+    // Dim the scene behind the overlay (screen-pinned, above the world).
+    const dim = this.add
+      .rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT, 0x06210f, 0.62)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(100)
+
+    // "YOU WIN!" headline — cartoon cream/gold fill with a dark outline.
+    const title = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.3, 'YOU WIN!', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '96px',
+        color: '#ffe9a8',
+        stroke: '#3a2410',
+        strokeThickness: 12,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+
+    // Replay button — reuse the title's play-button art.
+    const button = this.add
+      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.56, JungleTheme.assets.playButton.key)
+      .setScrollFactor(0)
+      .setDepth(101)
+      .setInteractive({ useHandCursor: true })
+    const btnScale = (GAME_WIDTH * 0.62) / button.width
+    button.setScale(btnScale)
+    button.on('pointerdown', this.replay, this)
+
+    const caption = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.68, 'TAP TO PLAY AGAIN', {
+        fontFamily: 'Arial, sans-serif',
+        fontSize: '34px',
+        color: '#ffffff',
+        stroke: '#3a2410',
+        strokeThickness: 5,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+
+    this.winOverlay = [dim, title, button, caption]
+
+    // Pop-in juice on the text + button.
+    for (const obj of [title, button, caption]) {
+      obj.setAlpha(0)
+    }
+    const baseScale = button.scale
+    this.tweens.add({
+      targets: [title, button, caption],
+      alpha: 1,
+      duration: 250,
+      ease: 'Quad.easeOut',
+    })
+    this.tweens.add({
+      targets: button,
+      scale: { from: baseScale * 0.7, to: baseScale },
+      duration: 320,
+      ease: 'Back.easeOut',
+    })
+
+    // Gentle idle pulse on the button (matches the title screen).
+    this.tweens.add({
+      targets: button,
+      scale: { from: baseScale, to: baseScale * 1.06 },
+      duration: 700,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+      delay: 320,
+    })
+  }
+
+  /** Fade out and restart the level from scratch. */
+  private replay() {
+    if (this.restarting) return
+    this.restarting = true
+    // Tear down the overlay objects (scene.restart also destroys them, but this
+    // makes the intent explicit and drops the button's listener immediately).
+    for (const obj of this.winOverlay) obj.destroy()
+    this.winOverlay = []
+    this.cameras.main.fadeOut(200, 0, 0, 0)
+    this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      this.scene.restart()
     })
   }
 
