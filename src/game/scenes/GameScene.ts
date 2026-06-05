@@ -71,6 +71,12 @@ const RELEASE_BOOST = 1.5
 /** On-screen thickness of the rope vine, as a fraction of screen width. */
 const ROPE_WIDTH = 0.06
 
+/** Visual-juice particle textures (generated at runtime, no art needed). */
+const PARTICLE_KEY = 'juice-dot' // soft white dot, tinted per-burst
+/** Tints for the bursts. */
+const GRAB_TINT = 0x9be36b // leaf green — catching a vine hook
+const DUST_TINT = 0xddc9a0 // sandy dust — launch & landing puffs
+
 /** Character motion state. */
 const MoveState = {
   Idle: 0,
@@ -140,6 +146,8 @@ export class GameScene extends Phaser.Scene {
   private restarting = false
   /** Screen-pinned overlay objects shown on win (cleaned up on restart). */
   private winOverlay: Phaser.GameObjects.GameObject[] = []
+  /** True while the "TRY AGAIN" fall flash is playing (before respawn). */
+  private respawning = false
 
   constructor() {
     super('GameScene')
@@ -160,6 +168,7 @@ export class GameScene extends Phaser.Scene {
     this.won = false
     this.restarting = false
     this.winOverlay = []
+    this.respawning = false
 
     // Background layers as screen-pinned TileSprites (scrollFactor 0). Each uses
     // a runtime [original|mirrored] texture so tiling is perfectly seamless (no
@@ -179,6 +188,7 @@ export class GameScene extends Phaser.Scene {
     this.createJumpAnim()
     this.createLandAnim()
     this.createSwingAnims()
+    this.createParticleTexture()
 
     // Overhead bar: a screen-pinned TileSprite (scrollFactor 0) — a continuous
     // beam across the top no matter how far the camera scrolls forward. Uses a
@@ -255,8 +265,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onPointerDown() {
-    // Ignore gameplay taps once the level is won (the win overlay owns input).
-    if (this.won) return
+    // Ignore gameplay taps once the level is won (the win overlay owns input)
+    // or while the fall flash is playing.
+    if (this.won || this.respawning) return
     this.holding = true
     if (this.state === MoveState.Idle) {
       this.launch()
@@ -264,7 +275,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onPointerUp() {
-    if (this.won) return
+    if (this.won || this.respawning) return
     this.holding = false
     if (this.state === MoveState.Swinging) {
       this.release()
@@ -274,6 +285,8 @@ export class GameScene extends Phaser.Scene {
   /** Leave the platform: play the jump launch animation and start free flight. */
   private launch() {
     this.sound.play(JungleTheme.assets.jumpSound.key)
+    // Dust puff kicked up off the platform under his feet.
+    this.burst(this.character.x, this.character.y, DUST_TINT, 10, 200)
     this.setJumpPose(true)
     this.vx = LAUNCH_VX
     this.vy = LAUNCH_VY
@@ -316,6 +329,10 @@ export class GameScene extends Phaser.Scene {
     this.character.setScale((GAME_HEIGHT * LAND_BODY_HEIGHT) / land.bodyHeight)
     this.character.setPosition(this.landingX, this.landingY)
     this.character.play(LAND_ANIM, true)
+
+    // Juice: touchdown dust at the feet + a brief camera shake for impact.
+    this.burst(this.landingX, this.landingY, DUST_TINT, 16, 260)
+    this.cameras.main.shake(220, 0.008)
     this.character.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
       this.setIdlePose()
       this.character.setPosition(this.landingX, this.landingY)
@@ -512,6 +529,23 @@ export class GameScene extends Phaser.Scene {
     // Force the initial swing pose (forward = angle increasing / rightward).
     this.swingForward = this.angVel < 0 // set opposite so setSwingPose always applies
     this.setSwingPose(this.angVel >= 0)
+
+    // Juice: leaf burst at the grabbed hook + a quick pop on both hook & character.
+    this.burst(hook.x, hook.y, GRAB_TINT, 12, 260)
+    this.squashPop()
+    this.popHook(hook)
+  }
+
+  /** Quick scale-bounce on a hook when grabbed. */
+  private popHook(hook: Phaser.GameObjects.Image) {
+    const s = hook.scale
+    this.tweens.add({
+      targets: hook,
+      scale: s * 1.18,
+      duration: 110,
+      ease: 'Quad.easeOut',
+      yoyo: true,
+    })
   }
 
   /** Detach and fly off along the swing's tangent (momentum preserved). */
@@ -522,6 +556,9 @@ export class GameScene extends Phaser.Scene {
     const tangentY = -Math.sin(this.angle)
     this.vx = tangentX * tangentialSpeed * RELEASE_BOOST
     this.vy = tangentY * tangentialSpeed * RELEASE_BOOST
+
+    // Juice: a small puff at the point of release.
+    this.burst(this.character.x, this.character.y, GRAB_TINT, 8, 220)
 
     this.attachedHook = null
     this.setJumpPose(false) // hold the leap frame, don't replay the launch sequence
@@ -546,11 +583,18 @@ export class GameScene extends Phaser.Scene {
   update(_time: number, delta: number) {
     const dt = delta / 1000
 
-    // Fell off the bottom → respawn at the start.
-    if (this.state === MoveState.Flying && this.character.y > GAME_HEIGHT + FALL_LIMIT) {
-      this.respawn()
+    // Fell off the bottom → show a brief "TRY AGAIN" flash, then respawn.
+    if (
+      this.state === MoveState.Flying &&
+      !this.respawning &&
+      this.character.y > GAME_HEIGHT + FALL_LIMIT
+    ) {
+      this.fail()
       return
     }
+
+    // While the fall flash plays, hold the world still (no physics/grab/camera).
+    if (this.respawning) return
 
     // The temple is a hard end wall — the character can't pass its front x from
     // any direction (top, bottom, or straight on). Reaching it = land (win).
@@ -688,6 +732,52 @@ export class GameScene extends Phaser.Scene {
     this.overheadBar.setPosition(0, -bar.woodTopRatio * texHeight * scale)
   }
 
+  /** Generate a soft round dot texture once, used (tinted) for all juice bursts. */
+  private createParticleTexture() {
+    if (this.textures.exists(PARTICLE_KEY)) return
+    const r = 16
+    const g = this.make.graphics({ x: 0, y: 0 }, false)
+    g.fillStyle(0xffffff, 1)
+    g.fillCircle(r, r, r)
+    g.fillStyle(0xffffff, 0.5)
+    g.fillCircle(r, r, r) // double-fill center for a soft falloff feel
+    g.generateTexture(PARTICLE_KEY, r * 2, r * 2)
+    g.destroy()
+  }
+
+  /** One-shot particle burst at a world point (auto-destroys when done). */
+  private burst(x: number, y: number, tint: number, count: number, speed: number) {
+    const emitter = this.add.particles(x, y, PARTICLE_KEY, {
+      tint,
+      lifespan: 420,
+      speed: { min: speed * 0.4, max: speed },
+      angle: { min: 0, max: 360 },
+      scale: { start: 0.5, end: 0 },
+      alpha: { start: 0.9, end: 0 },
+      gravityY: 300,
+      quantity: count,
+      emitting: false,
+    })
+    emitter.setDepth(12) // above the character (11)
+    emitter.explode(count)
+    // Clean up once the last particle has faded.
+    this.time.delayedCall(500, () => emitter.destroy())
+  }
+
+  /** Quick squash-and-stretch pop on the character (e.g. on grab). */
+  private squashPop() {
+    const sx = this.character.scaleX
+    const sy = this.character.scaleY
+    this.tweens.add({
+      targets: this.character,
+      scaleX: sx * 1.12,
+      scaleY: sy * 0.88,
+      duration: 90,
+      ease: 'Quad.easeOut',
+      yoyo: true,
+    })
+  }
+
   /**
    * Build a `[ original | horizontally-mirrored ]` texture from a loaded image
    * and return its key. This doubled texture tiles perfectly seamlessly (every
@@ -770,6 +860,53 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Return the character to the starting platform after a fall. */
+  /** Fell off the bottom: flash a brief "TRY AGAIN", then respawn at the start. */
+  private fail() {
+    this.respawning = true
+    // Freeze the character so it doesn't keep falling behind the flash.
+    this.vx = 0
+    this.vy = 0
+    this.rope.setVisible(false)
+
+    // Screen-pinned red dim + "TRY AGAIN" caption (above the world).
+    const dim = this.add
+      .rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT, 0x5a0d0d, 0)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(100)
+    const label = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.42, 'TRY AGAIN', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '76px',
+        color: '#ffffff',
+        stroke: '#3a0a0a',
+        strokeThickness: 10,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+      .setAlpha(0)
+      .setScale(0.7)
+
+    // Flash in, hold briefly, then fade out → respawn and clean up.
+    this.tweens.add({ targets: dim, alpha: 0.45, duration: 160, yoyo: true, hold: 360 })
+    this.tweens.add({
+      targets: label,
+      alpha: 1,
+      scale: 1,
+      duration: 200,
+      ease: 'Back.easeOut',
+      yoyo: true,
+      hold: 360,
+      onComplete: () => {
+        dim.destroy()
+        label.destroy()
+        this.respawn()
+        this.respawning = false
+      },
+    })
+  }
+
   private respawn() {
     this.state = MoveState.Idle
     this.holding = false
