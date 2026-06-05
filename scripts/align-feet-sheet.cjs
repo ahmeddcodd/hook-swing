@@ -166,14 +166,25 @@ function measure(img, xStart, xEnd) {
 }
 
 function main() {
-  const [input, output, maxFramesStr] = process.argv.slice(2)
+  const [input, output, rangeStr] = process.argv.slice(2)
   if (!input || !output) {
-    console.error('Usage: node align-feet-sheet.cjs <input.png> <output.png> [maxFrames]')
+    console.error(
+      'Usage: node align-feet-sheet.cjs <input.png> <output.png> [N | start:end]\n' +
+        '  N        = first N figures\n' +
+        '  start:end = figures [start, end) (0-based, end exclusive)'
+    )
     process.exit(1)
   }
   const img = decodePNG(fs.readFileSync(input))
   let figures = detectFigures(img)
-  if (maxFramesStr) figures = figures.slice(0, parseInt(maxFramesStr, 10))
+  if (rangeStr) {
+    if (rangeStr.includes(':')) {
+      const [s, e] = rangeStr.split(':').map((n) => parseInt(n, 10))
+      figures = figures.slice(s, e)
+    } else {
+      figures = figures.slice(0, parseInt(rangeStr, 10))
+    }
+  }
   const frameCount = figures.length
 
   const m = figures.map(([a, b]) => measure(img, a, b))

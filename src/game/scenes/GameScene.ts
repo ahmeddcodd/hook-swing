@@ -41,6 +41,15 @@ const BAR_WOOD_THICKNESS = 0.09
 
 /** Horizontal screen position the camera keeps the character at, as a fraction of width. */
 const CHARACTER_SCREEN_X = 0.3
+/** How quickly the camera catches up to the player each frame (0–1; higher = snappier). */
+const CAM_FOLLOW_LERP = 0.12
+
+/** Per-background-layer parallax factor (index-matched to theme background[]).
+ *  0 = static; higher = drifts faster with travel. Sky slow, hills a bit faster. */
+const BG_PARALLAX = [0.12, 0.35]
+
+/** Fall past this far below the screen bottom (px) → respawn at the start. */
+const FALL_LIMIT = 200
 
 /**
  * Swing physics (custom pendulum — no engine). All in px and seconds.
@@ -50,8 +59,8 @@ const SWING_GRAVITY = 2200 // px/s² downward
 const LAUNCH_VX = 480 // px/s rightward
 const LAUNCH_VY = -1150 // px/s upward (arcs up into the hook band)
 /** Grab the nearest circle within this distance (px) when holding. Generous so
- *  a circle reliably catches as he flies past in range. */
-const GRAB_RADIUS = 340
+ *  a tap while flying/falling reliably catches the nearest circle. */
+const GRAB_RADIUS = 460
 /** Per-frame energy retention while swinging (1 = none lost). Near-1 so the
  *  swing keeps its energy and can carry to the next circle. */
 const SWING_DAMPING = 0.9995
@@ -59,25 +68,35 @@ const SWING_DAMPING = 0.9995
  *  him far enough to reach the next circle. */
 const RELEASE_BOOST = 1.5
 
-/** Rope line visual. */
-const ROPE_LINE_WIDTH = 8
-const ROPE_LINE_COLOR = 0x5a8f3a
+/** On-screen thickness of the rope vine, as a fraction of screen width. */
+const ROPE_WIDTH = 0.06
 
 /** Character motion state. */
 const MoveState = {
   Idle: 0,
   Flying: 1,
   Swinging: 2,
+  Landing: 3, // reached the goal temple (won) — stops here
 } as const
 type MoveState = (typeof MoveState)[keyof typeof MoveState]
 
 /** Pre-placed zig-zag chain of wooden circles ahead in the level. */
 const HOOK_SIZE = 0.16 // diameter, fraction of screen width
 const HOOK_COUNT = 12 // how many circles in the chain
-const HOOK_GAP_X = 0.38 // horizontal spacing between circles, fraction of screen width
-const HOOK_START_X = 0.62 // first circle's x, fraction of screen width (in the launch arc)
+const HOOK_GAP_X = 0.62 // horizontal spacing between circles, fraction of screen width (wider gaps)
+const HOOK_START_X = 0.9 // first circle's x — further forward, where the big jump carries him
 const HOOK_HIGH_Y = 0.5 // "up" row, fraction of screen height
 const HOOK_LOW_Y = 0.58 // "down" row, fraction of screen height (gentler so swings carry)
+
+/** Goal temple at the level end. */
+const TEMPLE_HEIGHT = 0.92 // on-screen height, fraction of screen height (tall temple)
+const TEMPLE_GROUND_Y = 1.02 // where the temple base sits, fraction of screen height (base off-screen)
+/** How far past the last hook the temple sits, fraction of screen width. */
+const TEMPLE_GAP_X = 0.55
+/** Landing animation (frames 3&4 of the jump source). */
+const LAND_ANIM = 'character-land'
+const LAND_FPS = 8
+const LAND_BODY_HEIGHT = 0.16
 
 /**
  * GameScene — the screen the player enters from the title.
@@ -87,12 +106,18 @@ const HOOK_LOW_Y = 0.58 // "down" row, fraction of screen height (gentler so swi
  * Gameplay (hooks, swing physics) is added in a later phase.
  */
 export class GameScene extends Phaser.Scene {
-  private layers: Phaser.GameObjects.Image[] = []
+  private layers: Phaser.GameObjects.TileSprite[] = []
   private platform!: Phaser.GameObjects.Image
   private overheadBar!: Phaser.GameObjects.TileSprite
   private hooks: Phaser.GameObjects.Image[] = []
+  private temple!: Phaser.GameObjects.Image
+  /** World landing point on the temple steps. */
+  private landingX = 0
+  private landingY = 0
+  /** Hard end wall: the character can never pass this x (the temple front). */
+  private templeWallX = 0
   private character!: Phaser.GameObjects.Sprite
-  private rope!: Phaser.GameObjects.Graphics
+  private rope!: Phaser.GameObjects.Image
 
   private state: MoveState = MoveState.Idle
   private holding = false
@@ -104,27 +129,34 @@ export class GameScene extends Phaser.Scene {
   private ropeLen = 0
   private angle = 0 // radians, measured from straight-down at the hook
   private angVel = 0 // rad/s
-  private lastReleasedHook: Phaser.GameObjects.Image | null = null
   /** Current swing animation direction (true = forward/travel direction). */
   private swingForward = true
+  /** World position the character starts (and respawns) at. */
+  private startX = 0
+  private startY = 0
 
   constructor() {
     super('GameScene')
   }
 
   create() {
-    // Background pinned to the camera (scrollFactor 0) so it keeps filling the
-    // view as the camera scrolls with the character.
-    this.layers = JungleTheme.assets.background.map((layer, index) => {
-      const img = this.add.image(0, 0, layer.key).setOrigin(0.5).setScrollFactor(0)
-      img.setDepth(index)
-      return img
-    })
+    // Background layers as screen-pinned TileSprites (scrollFactor 0). Each uses
+    // a runtime [original|mirrored] texture so tiling is perfectly seamless (no
+    // edge-mismatch seam lines). They scroll at different speeds for parallax
+    // depth (see update()). Depth: index 0 (sky) behind, index 1 (hills) front.
+    this.layers = JungleTheme.assets.background.map((layer, index) =>
+      this.add
+        .tileSprite(0, 0, GAME_WIDTH, GAME_HEIGHT, this.buildMirroredTexture(layer.key))
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(index)
+    )
 
     const { platform, characterIdle } = JungleTheme.assets
 
     this.createIdleAnim()
     this.createJumpAnim()
+    this.createLandAnim()
     this.createSwingAnims()
 
     // Overhead bar: a screen-pinned TileSprite (scrollFactor 0) — a continuous
@@ -149,6 +181,14 @@ export class GameScene extends Phaser.Scene {
       )
     }
 
+    // Goal temple at the far right, just past the last hook. Bottom-anchored on
+    // the ground line. The character lands on its steps to win.
+    const templeX = GAME_WIDTH * (HOOK_START_X + (HOOK_COUNT - 1) * HOOK_GAP_X + TEMPLE_GAP_X)
+    this.temple = this.add
+      .image(templeX, GAME_HEIGHT * TEMPLE_GROUND_Y, JungleTheme.assets.destination.key)
+      .setOrigin(0.5, 1)
+      .setDepth(9)
+
     // Platform anchored by its bottom-center so it sits flush on the ground.
     this.platform = this.add
       .image(0, 0, platform.key)
@@ -163,8 +203,14 @@ export class GameScene extends Phaser.Scene {
       .setDepth(11)
       .play(IDLE_ANIM)
 
-    // Rope line, drawn between hook and character while swinging.
-    this.rope = this.add.graphics().setDepth(8)
+    // Swing rope vine, drawn (stretched + rotated) from hook to hands while
+    // swinging. Origin top-center so the top sits at the hook. Depth 6 = below
+    // the hook (7) and character (11) so both ends tuck under them.
+    this.rope = this.add
+      .image(0, 0, JungleTheme.assets.rope.key)
+      .setOrigin(0.5, 0)
+      .setDepth(6)
+      .setVisible(false)
 
     this.layout()
     this.scale.on('resize', this.layout, this)
@@ -215,6 +261,45 @@ export class GameScene extends Phaser.Scene {
       frames: this.anims.generateFrameNumbers(jump.key, { start: 0, end: jump.frameCount - 1 }),
       frameRate: JUMP_FPS,
       repeat: 0, // play once
+    })
+  }
+
+  private createLandAnim() {
+    if (this.anims.exists(LAND_ANIM)) return
+    const land = JungleTheme.assets.characterLand
+    this.anims.create({
+      key: LAND_ANIM,
+      frames: this.anims.generateFrameNumbers(land.key, { start: 0, end: land.frameCount - 1 }),
+      frameRate: LAND_FPS,
+      repeat: 0, // play once
+    })
+  }
+
+  /** Reached the temple: snap onto the steps, play the landing anim once, then
+   *  settle into idle. Level complete — stops here. */
+  private land() {
+    this.state = MoveState.Landing
+    this.holding = false
+    this.vx = 0
+    this.vy = 0
+    this.rope.setVisible(false)
+
+    const land = JungleTheme.assets.characterLand
+    this.character.setOrigin(0.5, land.feetOriginY)
+    this.character.setScale((GAME_HEIGHT * LAND_BODY_HEIGHT) / land.bodyHeight)
+    this.character.setPosition(this.landingX, this.landingY)
+    this.character.play(LAND_ANIM, true)
+    this.character.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
+      this.setIdlePose()
+      this.character.setPosition(this.landingX, this.landingY)
+    })
+
+    // Smoothly pan the camera to center the temple on screen.
+    this.tweens.add({
+      targets: this.cameras.main,
+      scrollX: this.temple.x - GAME_WIDTH / 2,
+      duration: 600,
+      ease: 'Sine.easeInOut',
     })
   }
 
@@ -316,18 +401,17 @@ export class GameScene extends Phaser.Scene {
     this.vx = tangentX * tangentialSpeed * RELEASE_BOOST
     this.vy = tangentY * tangentialSpeed * RELEASE_BOOST
 
-    this.lastReleasedHook = this.attachedHook
     this.attachedHook = null
     this.setJumpPose(false) // hold the leap frame, don't replay the launch sequence
     this.state = MoveState.Flying
   }
 
   private nearestHookInRange(): Phaser.GameObjects.Image | null {
-    // Never re-grab the hook we just released — always progress to a new one.
+    // Always grab the nearest circle in range — re-grab fully enabled (no
+    // exclusion), so a tap while falling reliably reconnects to the closest one.
     let best: Phaser.GameObjects.Image | null = null
     let bestDist = GRAB_RADIUS
     for (const hook of this.hooks) {
-      if (hook === this.lastReleasedHook) continue
       const d = Phaser.Math.Distance.Between(this.character.x, this.character.y, hook.x, hook.y)
       if (d <= bestDist) {
         bestDist = d
@@ -339,6 +423,22 @@ export class GameScene extends Phaser.Scene {
 
   update(_time: number, delta: number) {
     const dt = delta / 1000
+
+    // Fell off the bottom → respawn at the start.
+    if (this.state === MoveState.Flying && this.character.y > GAME_HEIGHT + FALL_LIMIT) {
+      this.respawn()
+      return
+    }
+
+    // The temple is a hard end wall — the character can't pass its front x from
+    // any direction (top, bottom, or straight on). Reaching it = land (win).
+    if (
+      (this.state === MoveState.Flying || this.state === MoveState.Swinging) &&
+      this.character.x >= this.templeWallX
+    ) {
+      this.land()
+      return
+    }
 
     if (this.state === MoveState.Flying) {
       // While holding & flying, keep trying to grab a nearby hook.
@@ -362,22 +462,42 @@ export class GameScene extends Phaser.Scene {
 
     this.drawRope()
 
-    // Horizontal-only camera follow (ground/vertical stays fixed).
-    if (this.state !== MoveState.Idle) {
+    // Horizontal-only camera follow (ground/vertical stays fixed). Follows the
+    // player in BOTH directions (so swinging backward onto an earlier circle
+    // stays in view), smoothly lerped to avoid jitter. Skip while landing/won —
+    // land() centers the camera on the temple instead.
+    if (this.state === MoveState.Flying || this.state === MoveState.Swinging) {
       const cam = this.cameras.main
       const targetScrollX = this.character.x - GAME_WIDTH * CHARACTER_SCREEN_X
-      if (targetScrollX > cam.scrollX) cam.scrollX = targetScrollX
+      cam.scrollX += (targetScrollX - cam.scrollX) * CAM_FOLLOW_LERP
     }
+
+    // Parallax: drift each background layer at its own factor relative to the
+    // camera, so far (sky) moves slower than near (hills). Runs every frame.
+    const scrollX = this.cameras.main.scrollX
+    this.layers.forEach((sprite, index) => {
+      sprite.tilePositionX = (scrollX * BG_PARALLAX[index]) / sprite.tileScaleX
+    })
   }
 
+  /** Stretch + rotate the rope vine from the hook (top) to the hands (bottom). */
   private drawRope() {
-    this.rope.clear()
-    if (this.state !== MoveState.Swinging || !this.attachedHook) return
-    this.rope.lineStyle(ROPE_LINE_WIDTH, ROPE_LINE_COLOR, 1)
-    this.rope.beginPath()
-    this.rope.moveTo(this.attachedHook.x, this.attachedHook.y)
-    this.rope.lineTo(this.character.x, this.character.y)
-    this.rope.strokePath()
+    if (this.state !== MoveState.Swinging || !this.attachedHook) {
+      this.rope.setVisible(false)
+      return
+    }
+    const a = this.attachedHook
+    const b = this.character
+    const dist = Math.hypot(b.x - a.x, b.y - a.y)
+    const ang = Math.atan2(b.y - a.y, b.x - a.x)
+
+    this.rope.setPosition(a.x, a.y)
+    // Vine extends DOWN (+Y) from its top-center origin; rotate to face the hands.
+    this.rope.setRotation(ang - Math.PI / 2)
+    // Stretch length to span hook→hands; fixed thickness independent of length.
+    this.rope.scaleY = dist / this.rope.height
+    this.rope.scaleX = (GAME_WIDTH * ROPE_WIDTH) / this.rope.width
+    this.rope.setVisible(true)
   }
 
   private createIdleAnim() {
@@ -398,6 +518,7 @@ export class GameScene extends Phaser.Scene {
     this.layoutBackground()
     this.layoutOverheadBar()
     this.layoutHooks()
+    this.layoutTemple()
     this.layoutStart()
   }
 
@@ -405,6 +526,24 @@ export class GameScene extends Phaser.Scene {
   private layoutHooks() {
     const size = GAME_WIDTH * HOOK_SIZE
     for (const hook of this.hooks) hook.setDisplaySize(size, size)
+  }
+
+  /** Size the temple (by height) and compute the world landing point on its ledge. */
+  private layoutTemple() {
+    const dest = JungleTheme.assets.destination
+    const scale = (GAME_HEIGHT * TEMPLE_HEIGHT) / this.temple.height
+    this.temple.setScale(scale)
+
+    // Landing point = the steps' surface, from the measured ratios. Temple origin
+    // is bottom-center, so convert image ratios to world coords around it.
+    const w = this.temple.displayWidth
+    const h = this.temple.displayHeight
+    const left = this.temple.x - w / 2
+    const top = this.temple.y - h
+    this.landingX = left + w * dest.landingXRatio
+    this.landingY = top + h * dest.landingSurfaceRatio
+    // Hard end wall at the temple's front entrance — he can't pass this x.
+    this.templeWallX = this.landingX
   }
 
   /** Pin the overhead bar flush to the top, spanning the full screen width. */
@@ -423,12 +562,51 @@ export class GameScene extends Phaser.Scene {
     this.overheadBar.setPosition(0, -bar.woodTopRatio * texHeight * scale)
   }
 
-  /** Cover-fit every background layer to fill the portrait viewport, centered. */
+  /**
+   * Build a `[ original | horizontally-mirrored ]` texture from a loaded image
+   * and return its key. This doubled texture tiles perfectly seamlessly (every
+   * wrap meets identical pixels), eliminating the edge-mismatch seam lines that
+   * appear when tiling the raw, non-seamless background art. Idempotent.
+   */
+  private buildMirroredTexture(srcKey: string): string {
+    const mirrorKey = `${srcKey}__mirror`
+    if (this.textures.exists(mirrorKey)) return mirrorKey
+
+    const src = this.textures.get(srcKey).getSourceImage() as HTMLImageElement
+    const w = src.width
+    const h = src.height
+    const canvasTex = this.textures.createCanvas(mirrorKey, w * 2, h)
+    if (!canvasTex) return mirrorKey
+
+    const ctx = canvasTex.context
+    ctx.clearRect(0, 0, w * 2, h) // preserve transparency (hills)
+    ctx.drawImage(src, 0, 0)
+    // Mirror into the right half: flip horizontally, translate by 2w.
+    ctx.save()
+    ctx.translate(w * 2, 0)
+    ctx.scale(-1, 1)
+    ctx.drawImage(src, 0, 0)
+    ctx.restore()
+    canvasTex.refresh() // upload canvas → GPU
+
+    return mirrorKey
+  }
+
+  /** Cover-fit every background TileSprite to fill the portrait viewport. The
+   *  sprite spans the screen; the texture is scaled (tileScale) to cover it and
+   *  vertically centered, matching the previous static look — but now scrollable. */
   private layoutBackground() {
-    for (const img of this.layers) {
-      img.setPosition(GAME_WIDTH / 2, GAME_HEIGHT / 2)
-      const scale = Math.max(GAME_WIDTH / img.width, GAME_HEIGHT / img.height)
-      img.setScale(scale)
+    for (const sprite of this.layers) {
+      sprite.setPosition(0, 0)
+      sprite.setSize(GAME_WIDTH, GAME_HEIGHT)
+      const tex = sprite.texture.getSourceImage() as HTMLImageElement
+      // The texture is the doubled [original|mirror] canvas, so the single tile
+      // width is half of it — cover-fit against that so framing is unchanged.
+      const tileW = tex.width / 2
+      const scale = Math.max(GAME_WIDTH / tileW, GAME_HEIGHT / tex.height)
+      sprite.setTileScale(scale, scale)
+      // Center the texture vertically (tilePositionY is in texture pixels).
+      sprite.tilePositionY = (tex.height - GAME_HEIGHT / scale) / 2
     }
   }
 
@@ -441,22 +619,40 @@ export class GameScene extends Phaser.Scene {
     this.platform.setScale(platformScale)
     this.platform.setPosition(platformX, platformBottomY)
 
-    // Once he leaves the platform, the sim owns the character — don't re-plant.
-    if (this.state !== MoveState.Idle) return
-
-    // Scale the character by its visible body height so on-screen size is
-    // predictable regardless of frame padding.
-    const charScale =
-      (GAME_HEIGHT * CHARACTER_BODY_HEIGHT) / JungleTheme.assets.characterIdle.bodyHeight
-    this.character.setScale(charScale)
-
-    // Plant the feet on the slab's actual top surface (measured surfaceRatio),
-    // sunk a hair so they rest on it rather than hovering on the edge.
+    // Record the start/respawn position (feet on the slab's actual top surface,
+    // sunk a hair so they rest on it rather than hovering on the edge).
     const platformTopY = platformBottomY - this.platform.displayHeight
-    const surfaceY =
+    this.startX = platformX
+    this.startY =
       platformTopY +
       this.platform.displayHeight *
         (JungleTheme.assets.platform.surfaceRatio + CHARACTER_FOOT_SINK)
-    this.character.setPosition(platformX, surfaceY)
+
+    // Once he leaves the platform, the sim owns the character — don't re-plant.
+    if (this.state !== MoveState.Idle) return
+
+    this.setIdlePose()
+    this.character.setPosition(this.startX, this.startY)
+  }
+
+  /** Standing idle pose on the platform. */
+  private setIdlePose() {
+    const idle = JungleTheme.assets.characterIdle
+    this.character.setOrigin(0.5, idle.feetOriginY)
+    this.character.setScale((GAME_HEIGHT * CHARACTER_BODY_HEIGHT) / idle.bodyHeight)
+    this.character.play(IDLE_ANIM, true)
+  }
+
+  /** Return the character to the starting platform after a fall. */
+  private respawn() {
+    this.state = MoveState.Idle
+    this.holding = false
+    this.vx = 0
+    this.vy = 0
+    this.attachedHook = null
+    this.rope.setVisible(false)
+    this.setIdlePose()
+    this.character.setPosition(this.startX, this.startY)
+    this.cameras.main.scrollX = 0
   }
 }
