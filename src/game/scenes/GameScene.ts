@@ -10,6 +10,19 @@ import { JungleTheme } from '../themes/jungle.ts'
 const IDLE_ANIM = 'character-idle'
 const IDLE_FPS = 5
 
+/** Jump launch animation (run→leap, plays once then holds the last frame). */
+const JUMP_ANIM = 'character-jump'
+const JUMP_FPS = 12
+
+/** Directional swing animations (hands stay locked on the rope). */
+const SWING_FWD_ANIM = 'swing-forward'
+const SWING_BACK_ANIM = 'swing-backward'
+/** Slower frames — the smooth motion comes from the pendulum arc, not the cycling. */
+const SWING_FPS = 4
+/** Only flip swing direction once speed clearly exceeds this (rad/s) — a deadzone
+ *  so the pose doesn't pop back and forth at the top of each swing. */
+const SWING_FLIP_DEADZONE = 0.4
+
 /** Starting-area layout, as fractions of the screen. */
 const PLATFORM_CENTER_X = 0.26
 const PLATFORM_BOTTOM_Y = 0.92
@@ -18,8 +31,8 @@ const PLATFORM_WIDTH = 0.38
 const CHARACTER_BODY_HEIGHT = 0.2
 /** Jump/flying pose body height (smaller — the leaping pose reads larger). */
 const JUMP_BODY_HEIGHT = 0.14
-/** Hanging pose body height (fraction of screen height). */
-const HANG_BODY_HEIGHT = 0.16
+/** Swing pose body height (fraction of screen height). */
+const SWING_BODY_HEIGHT = 0.16
 /** Sink the feet a touch below the slab surface so they don't look like they hover on its edge. */
 const CHARACTER_FOOT_SINK = 0.015
 
@@ -36,14 +49,15 @@ const SWING_GRAVITY = 2200 // px/s² downward
 /** Initial launch velocity off the platform (the tap "jump"). */
 const LAUNCH_VX = 480 // px/s rightward
 const LAUNCH_VY = -1150 // px/s upward (arcs up into the hook band)
-/** Grab the nearest circle within this distance (px) when holding. */
-const GRAB_RADIUS = 240
-/** Per-frame energy retention while swinging (1 = none lost). */
-const SWING_DAMPING = 0.996
-/** Tangential speed multiplier on release (1 = natural momentum). */
-const RELEASE_BOOST = 1.0
-/** Don't re-grab the just-released hook for this long (ms). */
-const RE_GRAB_COOLDOWN_MS = 250
+/** Grab the nearest circle within this distance (px) when holding. Generous so
+ *  a circle reliably catches as he flies past in range. */
+const GRAB_RADIUS = 340
+/** Per-frame energy retention while swinging (1 = none lost). Near-1 so the
+ *  swing keeps its energy and can carry to the next circle. */
+const SWING_DAMPING = 0.9995
+/** Tangential speed multiplier on release — a slingshot so each release flings
+ *  him far enough to reach the next circle. */
+const RELEASE_BOOST = 1.5
 
 /** Rope line visual. */
 const ROPE_LINE_WIDTH = 8
@@ -60,10 +74,10 @@ type MoveState = (typeof MoveState)[keyof typeof MoveState]
 /** Pre-placed zig-zag chain of wooden circles ahead in the level. */
 const HOOK_SIZE = 0.16 // diameter, fraction of screen width
 const HOOK_COUNT = 12 // how many circles in the chain
-const HOOK_GAP_X = 0.45 // horizontal spacing between circles, fraction of screen width
+const HOOK_GAP_X = 0.38 // horizontal spacing between circles, fraction of screen width
 const HOOK_START_X = 0.62 // first circle's x, fraction of screen width (in the launch arc)
 const HOOK_HIGH_Y = 0.5 // "up" row, fraction of screen height
-const HOOK_LOW_Y = 0.62 // "down" row, fraction of screen height (stronger up/down)
+const HOOK_LOW_Y = 0.58 // "down" row, fraction of screen height (gentler so swings carry)
 
 /**
  * GameScene — the screen the player enters from the title.
@@ -91,7 +105,8 @@ export class GameScene extends Phaser.Scene {
   private angle = 0 // radians, measured from straight-down at the hook
   private angVel = 0 // rad/s
   private lastReleasedHook: Phaser.GameObjects.Image | null = null
-  private lastReleaseTime = 0
+  /** Current swing animation direction (true = forward/travel direction). */
+  private swingForward = true
 
   constructor() {
     super('GameScene')
@@ -109,6 +124,8 @@ export class GameScene extends Phaser.Scene {
     const { platform, characterIdle } = JungleTheme.assets
 
     this.createIdleAnim()
+    this.createJumpAnim()
+    this.createSwingAnims()
 
     // Overhead bar: a screen-pinned TileSprite (scrollFactor 0) — a continuous
     // beam across the top no matter how far the camera scrolls forward.
@@ -182,31 +199,86 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  /** Leave the platform: switch to the jump pose and start free flight. */
+  /** Leave the platform: play the jump launch animation and start free flight. */
   private launch() {
-    this.setJumpPose()
+    this.setJumpPose(true)
     this.vx = LAUNCH_VX
     this.vy = LAUNCH_VY
     this.state = MoveState.Flying
   }
 
-  /** Flying/jumping pose: feet-anchored leaping frame. */
-  private setJumpPose() {
-    const jumpAsset = JungleTheme.assets.characterJump
-    this.character.anims.stop()
-    this.character.setTexture(jumpAsset.key, 0)
-    this.character.setOrigin(0.5, jumpAsset.feetOriginY)
-    this.character.setScale((GAME_HEIGHT * JUMP_BODY_HEIGHT) / jumpAsset.bodyHeight)
+  private createJumpAnim() {
+    if (this.anims.exists(JUMP_ANIM)) return
+    const jump = JungleTheme.assets.characterJump
+    this.anims.create({
+      key: JUMP_ANIM,
+      frames: this.anims.generateFrameNumbers(jump.key, { start: 0, end: jump.frameCount - 1 }),
+      frameRate: JUMP_FPS,
+      repeat: 0, // play once
+    })
   }
 
-  /** Hanging pose: raised-hand grip frame, origin at the HAND so it grabs the
-   *  rope's top end (the character then dangles below it). */
-  private setHangPose() {
-    const hangAsset = JungleTheme.assets.characterHang
-    this.character.anims.stop()
-    this.character.setTexture(hangAsset.key, hangAsset.hangFrame)
-    this.character.setOrigin(hangAsset.handOriginX, hangAsset.handOriginY)
-    this.character.setScale((GAME_HEIGHT * HANG_BODY_HEIGHT) / hangAsset.bodyHeight)
+  /**
+   * Flying/jumping pose, feet-anchored. `animate` plays the launch sequence once
+   * (used when leaving the platform); otherwise it just holds the final leap
+   * frame (used when releasing a hook back into flight).
+   */
+  private setJumpPose(animate: boolean) {
+    const jumpAsset = JungleTheme.assets.characterJump
+    this.character.setOrigin(0.5, jumpAsset.feetOriginY)
+    this.character.setScale((GAME_HEIGHT * JUMP_BODY_HEIGHT) / jumpAsset.bodyHeight)
+    if (animate) {
+      this.character.play(JUMP_ANIM, true)
+    } else {
+      this.character.anims.stop()
+      this.character.setTexture(jumpAsset.key, jumpAsset.frameCount - 1)
+    }
+  }
+
+  private createSwingAnims() {
+    const fwd = JungleTheme.assets.characterSwingForward
+    const back = JungleTheme.assets.characterSwingBackward
+    if (!this.anims.exists(SWING_FWD_ANIM)) {
+      this.anims.create({
+        key: SWING_FWD_ANIM,
+        frames: this.anims.generateFrameNumbers(fwd.key, { start: 0, end: fwd.frameCount - 1 }),
+        frameRate: SWING_FPS,
+        repeat: -1,
+        yoyo: true,
+      })
+    }
+    if (!this.anims.exists(SWING_BACK_ANIM)) {
+      this.anims.create({
+        key: SWING_BACK_ANIM,
+        frames: this.anims.generateFrameNumbers(back.key, { start: 0, end: back.frameCount - 1 }),
+        frameRate: SWING_FPS,
+        repeat: -1,
+        yoyo: true,
+      })
+    }
+  }
+
+  /** Apply the swing pose for a direction (true = forward/travel direction).
+   *  Sheets are hand-aligned & origin'd at the hands so the grip stays on the
+   *  rope. Both directions are scaled to the same on-screen body height so
+   *  swapping never changes size. No-op if already in that pose. */
+  private setSwingPose(forward: boolean) {
+    if (this.swingForward === forward && this.state === MoveState.Swinging) return
+    this.swingForward = forward
+    const asset = forward
+      ? JungleTheme.assets.characterSwingForward
+      : JungleTheme.assets.characterSwingBackward
+    this.character.setOrigin(asset.handOriginX, asset.handOriginY)
+    this.character.setScale((GAME_HEIGHT * SWING_BODY_HEIGHT) / asset.bodyHeight)
+    this.character.play(forward ? SWING_FWD_ANIM : SWING_BACK_ANIM, true)
+  }
+
+  /** Choose swing direction with a deadzone so the pose doesn't pop back and
+   *  forth at the top of each swing (where angVel passes through 0). */
+  private updateSwingDirection() {
+    if (this.angVel > SWING_FLIP_DEADZONE) this.setSwingPose(true)
+    else if (this.angVel < -SWING_FLIP_DEADZONE) this.setSwingPose(false)
+    // else: within the deadzone near the swing's apex — keep the current pose.
   }
 
   /** Attach to the nearest hook within range, starting a pendulum swing. */
@@ -229,8 +301,10 @@ export class GameScene extends Phaser.Scene {
     const tangentialSpeed = this.vx * tangentX + this.vy * tangentY
     this.angVel = tangentialSpeed / this.ropeLen
 
-    this.setHangPose()
     this.state = MoveState.Swinging
+    // Force the initial swing pose (forward = angle increasing / rightward).
+    this.swingForward = this.angVel < 0 // set opposite so setSwingPose always applies
+    this.setSwingPose(this.angVel >= 0)
   }
 
   /** Detach and fly off along the swing's tangent (momentum preserved). */
@@ -243,18 +317,17 @@ export class GameScene extends Phaser.Scene {
     this.vy = tangentY * tangentialSpeed * RELEASE_BOOST
 
     this.lastReleasedHook = this.attachedHook
-    this.lastReleaseTime = this.time.now
     this.attachedHook = null
-    this.setJumpPose()
+    this.setJumpPose(false) // hold the leap frame, don't replay the launch sequence
     this.state = MoveState.Flying
   }
 
   private nearestHookInRange(): Phaser.GameObjects.Image | null {
-    const onCooldown = this.time.now - this.lastReleaseTime < RE_GRAB_COOLDOWN_MS
+    // Never re-grab the hook we just released — always progress to a new one.
     let best: Phaser.GameObjects.Image | null = null
     let bestDist = GRAB_RADIUS
     for (const hook of this.hooks) {
-      if (onCooldown && hook === this.lastReleasedHook) continue
+      if (hook === this.lastReleasedHook) continue
       const d = Phaser.Math.Distance.Between(this.character.x, this.character.y, hook.x, hook.y)
       if (d <= bestDist) {
         bestDist = d
@@ -283,6 +356,8 @@ export class GameScene extends Phaser.Scene {
       this.angle += this.angVel * dt
       this.character.x = this.attachedHook.x + this.ropeLen * Math.sin(this.angle)
       this.character.y = this.attachedHook.y + this.ropeLen * Math.cos(this.angle)
+      // Face the swing direction, with a deadzone so it doesn't flip at the apex.
+      this.updateSwingDirection()
     }
 
     this.drawRope()

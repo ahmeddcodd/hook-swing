@@ -47,31 +47,42 @@ export const JungleTheme = {
       bodyTopY: 34,
       bodyHeight: 568,
     },
-    // Leaping/jump sheet (1774×887, 4 frames). We currently use only frame 0 as
-    // the jump pose. frame 0: feet at y≈625/887, body height ~381px.
+    // Jump/leap sheet — first 3 frames of the run→leap sequence, feet-aligned by
+    // scripts/align-feet-sheet.cjs. Played once on launch, then holds the last
+    // frame while airborne.
     characterJump: {
       key: 'character_jump',
-      path: 'character/character_jumping_spirit_sheet.png',
-      frameWidth: 443,
-      frameHeight: 887,
-      frameCount: 4,
-      feetOriginY: 0.7046,
-      bodyHeight: 381,
-    },
-    // Hanging sheet (2172×724, 3 frames → 724×724). We use frame 1 (one arm
-    // raised, gripping). The raised hand is the grab point: measured at
-    // x≈0.499, y≈0.152 of the frame — used as the origin so the hand sits on
-    // the rope's top end. Body spans y 110–627 (bodyHeight ~517).
-    characterHang: {
-      key: 'character_hang',
-      path: 'character/character_hanging_spirit_sheet.png',
-      frameWidth: 724,
-      frameHeight: 724,
+      path: 'character/character_jump_aligned.png',
+      frameWidth: 388,
+      frameHeight: 355,
       frameCount: 3,
-      hangFrame: 1,
-      handOriginX: 0.499,
-      handOriginY: 0.152,
-      bodyHeight: 517,
+      feetOriginY: 0.9549,
+      bodyHeight: 323,
+    },
+    // Swing sheets, hand-aligned by scripts/align-swing-sheet.cjs so the raised
+    // hands sit at the same top-center anchor in every frame. Origin = that hand
+    // point, placed on the rope's end → hands stay locked on the rope while the
+    // body swings below. Forward = swinging in the travel direction; backward =
+    // swinging back.
+    characterSwingForward: {
+      key: 'character_swing_fwd',
+      path: 'character/character_swing_forward_aligned.png',
+      frameWidth: 368,
+      frameHeight: 423,
+      frameCount: 2,
+      handOriginX: 0.5,
+      handOriginY: 0.0449,
+      bodyHeight: 374,
+    },
+    characterSwingBackward: {
+      key: 'character_swing_back',
+      path: 'character/character_swing_backward_aligned.png',
+      frameWidth: 572,
+      frameHeight: 479,
+      frameCount: 3,
+      handOriginX: 0.5,
+      handOriginY: 0.0438,
+      bodyHeight: 424,
     },
   },
 } as const

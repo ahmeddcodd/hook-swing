@@ -21,7 +21,8 @@ export class BootScene extends Phaser.Scene {
       platform,
       characterIdle,
       characterJump,
-      characterHang,
+      characterSwingForward,
+      characterSwingBackward,
     } = JungleTheme.assets
     this.load.image(cover.key, cover.path)
     this.load.image(playButton.key, playButton.path)
@@ -43,9 +44,13 @@ export class BootScene extends Phaser.Scene {
       frameWidth: characterJump.frameWidth,
       frameHeight: characterJump.frameHeight,
     })
-    this.load.spritesheet(characterHang.key, characterHang.path, {
-      frameWidth: characterHang.frameWidth,
-      frameHeight: characterHang.frameHeight,
+    this.load.spritesheet(characterSwingForward.key, characterSwingForward.path, {
+      frameWidth: characterSwingForward.frameWidth,
+      frameHeight: characterSwingForward.frameHeight,
+    })
+    this.load.spritesheet(characterSwingBackward.key, characterSwingBackward.path, {
+      frameWidth: characterSwingBackward.frameWidth,
+      frameHeight: characterSwingBackward.frameHeight,
     })
   }
 
