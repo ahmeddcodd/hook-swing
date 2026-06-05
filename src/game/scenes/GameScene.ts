@@ -160,11 +160,13 @@ export class GameScene extends Phaser.Scene {
     this.createSwingAnims()
 
     // Overhead bar: a screen-pinned TileSprite (scrollFactor 0) — a continuous
-    // beam across the top no matter how far the camera scrolls forward.
+    // beam across the top no matter how far the camera scrolls forward. Uses a
+    // mirrored texture so it tiles seamlessly, and is scrolled each frame (see
+    // update()) so the beam drifts with the world for a clear sense of motion.
     const bar = JungleTheme.assets.overheadBar
     const barTex = this.textures.get(bar.key).getSourceImage()
     this.overheadBar = this.add
-      .tileSprite(0, 0, GAME_WIDTH, barTex.height, bar.key)
+      .tileSprite(0, 0, GAME_WIDTH, barTex.height, this.buildMirroredTexture(bar.key))
       .setOrigin(0, 0)
       .setScrollFactor(0)
       .setDepth(5)
@@ -479,6 +481,10 @@ export class GameScene extends Phaser.Scene {
     this.layers.forEach((sprite, index) => {
       sprite.tilePositionX = (scrollX * BG_PARALLAX[index]) / sprite.tileScaleX
     })
+
+    // Overhead bar drifts with the world (factor 1) so the beam reads as a
+    // continuous structure scrolling past, matching the foreground motion.
+    this.overheadBar.tilePositionX = scrollX / this.overheadBar.tileScaleX
   }
 
   /** Stretch + rotate the rope vine from the hook (top) to the hands (bottom). */
