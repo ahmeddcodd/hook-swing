@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { GAME_WIDTH, GAME_HEIGHT } from '../config.ts'
 import { JungleTheme } from '../themes/jungle.ts'
+import { LEVELS } from '../levels.ts'
 
 /**
  * Idle animation. The spritesheet is pre-aligned (every frame centered &
@@ -90,19 +91,13 @@ const MoveState = {
 } as const
 type MoveState = (typeof MoveState)[keyof typeof MoveState]
 
-/** Pre-placed zig-zag chain of wooden circles ahead in the level. */
+/** Pre-placed zig-zag chain of wooden circles ahead in the level. Layout (count,
+ *  spacing, heights) is per-level — see src/game/levels.ts. */
 const HOOK_SIZE = 0.16 // diameter, fraction of screen width
-const HOOK_COUNT = 12 // how many circles in the chain
-const HOOK_GAP_X = 0.62 // horizontal spacing between circles, fraction of screen width (wider gaps)
-const HOOK_START_X = 0.9 // first circle's x — further forward, where the big jump carries him
-const HOOK_HIGH_Y = 0.5 // "up" row, fraction of screen height
-const HOOK_LOW_Y = 0.58 // "down" row, fraction of screen height (gentler so swings carry)
 
 /** Goal temple at the level end. */
 const TEMPLE_HEIGHT = 0.92 // on-screen height, fraction of screen height (tall temple)
 const TEMPLE_GROUND_Y = 1.02 // where the temple base sits, fraction of screen height (base off-screen)
-/** How far past the last hook the temple sits, fraction of screen width. */
-const TEMPLE_GAP_X = 0.55
 /** Landing animation (frames 3&4 of the jump source). */
 const LAND_ANIM = 'character-land'
 const LAND_FPS = 8
@@ -122,15 +117,17 @@ const STAR_2_SCORE = 2500
 const STAR_3_SCORE = 4000
 
 /** Collectible bananas (drawn at runtime, no art needed). Scattered through the
- *  vertical band the player travels so they stay reachable. */
-const BANANA_COUNT = 10
+ *  vertical band the player travels so they stay reachable. Count is per-level
+ *  (see src/game/levels.ts). */
 const BANANA_SIZE = 0.08 // on-screen height, fraction of screen width
 /** Vertical band (fraction of screen height) bananas spawn within — around the
  *  hook rows / swing arcs so they're catchable. */
 const BANANA_Y_MIN = 0.4
 const BANANA_Y_MAX = 0.72
-/** Collect when the character's center comes within this distance (px). */
-const BANANA_COLLECT_RADIUS = 90
+/** Collect when the character's travel path passes within this distance (px) of
+ *  a banana's center. Generous so a banana is never visually clipped yet missed;
+ *  combined with the swept (segment) check this also prevents fast pass-throughs. */
+const BANANA_COLLECT_RADIUS = 110
 
 /**
  * GameScene — the screen the player enters from the title.
@@ -189,9 +186,17 @@ export class GameScene extends Phaser.Scene {
   private bananasCollected = 0
   /** Total bananas spawned this run (denominator for the perfect-collect check). */
   private bananasTotal = 0
-  /** Live HUD: score (top-left) and combo multiplier (below it, hidden at 1x). */
+  /** Live HUD: score (top-center) and combo multiplier (below it, hidden at 1x).
+   *  The level indicator is a static label set once in createHud(). */
   private scoreText!: Phaser.GameObjects.Text
   private comboText!: Phaser.GameObjects.Text
+
+  /** Campaign progression (static so it survives scene.restart()). currentLevel
+   *  indexes LEVELS; campaignScore is the running total carried across levels.
+   *  These two fields are the entire save-state — a future YouTube SDK can seed
+   *  them in one place (see loadProgress note in the plan). */
+  private static currentLevel = 0
+  private static campaignScore = 0
 
   /** First-launch tutorial prompt objects (hand + label), torn down on launch. */
   private tutorial: Phaser.GameObjects.GameObject[] = []
@@ -201,6 +206,11 @@ export class GameScene extends Phaser.Scene {
 
   constructor() {
     super('GameScene')
+  }
+
+  /** The active level's layout/difficulty config. */
+  private get level() {
+    return LEVELS[GameScene.currentLevel]
   }
 
   create() {
@@ -219,7 +229,9 @@ export class GameScene extends Phaser.Scene {
     this.restarting = false
     this.winOverlay = []
     this.respawning = false
-    this.score = 0
+    // Start from the running campaign total so the HUD continues across levels
+    // (reset to 0 only when a new campaign begins — see restartCampaign()).
+    this.score = GameScene.campaignScore
     this.comboCount = 0
     this.scoredHooks.clear()
     this.bananas = []
@@ -261,11 +273,13 @@ export class GameScene extends Phaser.Scene {
 
     // Pre-placed zig-zag chain of wooden circles ahead in the level, at fixed
     // world positions. They come into view as the camera scrolls forward.
-    // Alternating high/low rows with horizontal gaps between them.
+    // Alternating high/low rows with horizontal gaps between them. Layout comes
+    // from the active level's config.
+    const level = this.level
     this.hooks = []
-    for (let i = 0; i < HOOK_COUNT; i++) {
-      const x = GAME_WIDTH * (HOOK_START_X + i * HOOK_GAP_X)
-      const y = GAME_HEIGHT * (i % 2 === 0 ? HOOK_HIGH_Y : HOOK_LOW_Y)
+    for (let i = 0; i < level.hookCount; i++) {
+      const x = GAME_WIDTH * (level.hookStartX + i * level.hookGapX)
+      const y = GAME_HEIGHT * (i % 2 === 0 ? level.hookHighY : level.hookLowY)
       this.hooks.push(
         this.add.image(x, y, JungleTheme.assets.hook.key).setOrigin(0.5).setDepth(7)
       )
@@ -290,7 +304,8 @@ export class GameScene extends Phaser.Scene {
 
     // Goal temple at the far right, just past the last hook. Bottom-anchored on
     // the ground line. The character lands on its steps to win.
-    const templeX = GAME_WIDTH * (HOOK_START_X + (HOOK_COUNT - 1) * HOOK_GAP_X + TEMPLE_GAP_X)
+    const templeX =
+      GAME_WIDTH * (level.hookStartX + (level.hookCount - 1) * level.hookGapX + level.templeGapX)
     this.temple = this.add
       .image(templeX, GAME_HEIGHT * TEMPLE_GROUND_Y, JungleTheme.assets.destination.key)
       .setOrigin(0.5, 1)
@@ -413,6 +428,8 @@ export class GameScene extends Phaser.Scene {
       this.score += SCORE_PERFECT_BONUS
     }
     this.scoreText.setText(String(this.score))
+    // Persist the running total so the next level continues from here.
+    GameScene.campaignScore = this.score
 
     const land = JungleTheme.assets.characterLand
     this.character.setOrigin(0.5, land.feetOriginY)
@@ -442,13 +459,16 @@ export class GameScene extends Phaser.Scene {
     })
   }
 
-  /** Reveal the "YOU WIN!" overlay with a tap-to-replay button. */
+  /** Reveal the win overlay. On a non-final level it offers NEXT LEVEL; on the
+   *  last level it's a campaign-complete screen with PLAY AGAIN. */
   private showWinOverlay() {
     this.won = true
 
-    // Commit the run's score to the persistent best before showing it.
+    // Commit the running campaign total to the persistent best before showing it.
     this.commitBestScore()
     const best = this.readBestScore()
+
+    const isFinalLevel = GameScene.currentLevel >= LEVELS.length - 1
 
     // Dim the scene behind the overlay (screen-pinned, above the world).
     const dim = this.add
@@ -457,11 +477,13 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(100)
 
-    // "YOU WIN!" headline — cartoon cream/gold fill with a dark outline.
+    // Headline — final level reads "YOU WIN!" (campaign done); otherwise
+    // "LEVEL N COMPLETE!". Cartoon cream/gold fill with a dark outline.
+    const headline = isFinalLevel ? 'YOU WIN!' : `LEVEL ${GameScene.currentLevel + 1}\nCOMPLETE!`
     const title = this.add
-      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.2, 'YOU WIN!', {
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.2, headline, {
         fontFamily: 'Arial Black, Arial, sans-serif',
-        fontSize: '96px',
+        fontSize: isFinalLevel ? '96px' : '72px',
         color: '#ffe9a8',
         stroke: '#3a2410',
         strokeThickness: 12,
@@ -522,7 +544,8 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(101)
 
-    // Replay button — reuse the title's play-button art.
+    // Advance button — reuse the title's play-button art. NEXT LEVEL on a normal
+    // level, PLAY AGAIN (restart campaign) after the last.
     const button = this.add
       .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.64, JungleTheme.assets.playButton.key)
       .setScrollFactor(0)
@@ -530,10 +553,10 @@ export class GameScene extends Phaser.Scene {
       .setInteractive({ useHandCursor: true })
     const btnScale = (GAME_WIDTH * 0.62) / button.width
     button.setScale(btnScale)
-    button.on('pointerdown', this.replay, this)
+    button.on('pointerdown', isFinalLevel ? this.restartCampaign : this.advanceLevel, this)
 
     const caption = this.add
-      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.74, 'TAP TO PLAY AGAIN', {
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.74, isFinalLevel ? 'TAP TO PLAY AGAIN' : 'TAP FOR NEXT LEVEL', {
         fontFamily: 'Arial, sans-serif',
         fontSize: '34px',
         color: '#ffffff',
@@ -658,7 +681,22 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Fade out and restart the level from scratch. */
-  private replay() {
+  /** Advance to the next level: bump the level index (campaignScore already holds
+   *  the running total) and restart the scene to build it. */
+  private advanceLevel() {
+    GameScene.currentLevel = Math.min(GameScene.currentLevel + 1, LEVELS.length - 1)
+    this.restartScene()
+  }
+
+  /** Start a fresh campaign from level 1 with a clean score. */
+  private restartCampaign() {
+    GameScene.currentLevel = 0
+    GameScene.campaignScore = 0
+    this.restartScene()
+  }
+
+  /** Shared fade-out → scene.restart() transition used by the win-overlay buttons. */
+  private restartScene() {
     if (this.restarting) return
     this.restarting = true
     // Tear down the overlay objects (scene.restart also destroys them, but this
@@ -818,7 +856,7 @@ export class GameScene extends Phaser.Scene {
    *  world but below the win overlay (100) so it's covered when you win. */
   private createHud() {
     this.scoreText = this.add
-      .text(GAME_WIDTH * 0.5, GAME_HEIGHT * 0.045, '0', {
+      .text(GAME_WIDTH * 0.5, GAME_HEIGHT * 0.045, String(this.score), {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '64px',
         color: '#ffe9a8',
@@ -843,6 +881,19 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(50)
       .setVisible(false)
+
+    // Level indicator, top-left (score is centered, so this stays clear of it).
+    this.add
+      .text(GAME_WIDTH * 0.04, GAME_HEIGHT * 0.05, `LEVEL ${GameScene.currentLevel + 1}`, {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '34px',
+        color: '#ffffff',
+        stroke: '#3a2410',
+        strokeThickness: 6,
+      })
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(50)
   }
 
   // --- Tutorial ------------------------------------------------------------
@@ -1101,11 +1152,12 @@ export class GameScene extends Phaser.Scene {
     const key = this.buildBananaTexture()
     // Horizontal span: from the first hook to just past the last (where the
     // action happens), with a little margin so none hide behind the temple.
-    const firstX = GAME_WIDTH * HOOK_START_X
-    const lastX = GAME_WIDTH * (HOOK_START_X + (HOOK_COUNT - 1) * HOOK_GAP_X)
+    const level = this.level
+    const firstX = GAME_WIDTH * level.hookStartX
+    const lastX = GAME_WIDTH * (level.hookStartX + (level.hookCount - 1) * level.hookGapX)
     const size = GAME_WIDTH * BANANA_SIZE
 
-    for (let i = 0; i < BANANA_COUNT; i++) {
+    for (let i = 0; i < level.bananaCount; i++) {
       const x = Phaser.Math.Between(firstX, lastX)
       const y = Phaser.Math.Between(GAME_HEIGHT * BANANA_Y_MIN, GAME_HEIGHT * BANANA_Y_MAX)
       const banana = this.add.image(x, y, key).setOrigin(0.5).setDepth(8) // above hooks(7), below character(11)
@@ -1135,20 +1187,42 @@ export class GameScene extends Phaser.Scene {
 
   /** Collect any banana the character now overlaps. Iterates a copy-free reverse
    *  loop so we can splice out collected ones safely. */
-  private checkBananaPickups() {
+  /** Collect any banana whose center lies within BANANA_COLLECT_RADIUS of the
+   *  segment the character travelled this frame (prev → current). Using the swept
+   *  segment instead of just the current point means a fast swing/release can't
+   *  tunnel straight past a banana between frames. */
+  private checkBananaPickups(prevX: number, prevY: number) {
+    const curX = this.character.x
+    const curY = this.character.y
+    const r2 = BANANA_COLLECT_RADIUS * BANANA_COLLECT_RADIUS
     for (let i = this.bananas.length - 1; i >= 0; i--) {
       const banana = this.bananas[i]
-      const d = Phaser.Math.Distance.Between(
-        this.character.x,
-        this.character.y,
-        banana.x,
-        banana.y
-      )
-      if (d <= BANANA_COLLECT_RADIUS) {
+      if (this.distSqPointToSegment(banana.x, banana.y, prevX, prevY, curX, curY) <= r2) {
         this.bananas.splice(i, 1)
         this.collectBanana(banana)
       }
     }
+  }
+
+  /** Squared distance from point (px,py) to the line segment (ax,ay)-(bx,by).
+   *  Squared to avoid a sqrt in the per-frame, per-banana loop. */
+  private distSqPointToSegment(
+    px: number,
+    py: number,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number
+  ): number {
+    const abx = bx - ax
+    const aby = by - ay
+    const lenSq = abx * abx + aby * aby
+    // Degenerate segment (no movement this frame) → point-to-point distance.
+    let t = lenSq > 0 ? ((px - ax) * abx + (py - ay) * aby) / lenSq : 0
+    t = t < 0 ? 0 : t > 1 ? 1 : t // clamp to the segment
+    const dx = px - (ax + abx * t)
+    const dy = py - (ay + aby * t)
+    return dx * dx + dy * dy
   }
 
   /** Award banana points + juice, then remove it. */
@@ -1258,6 +1332,11 @@ export class GameScene extends Phaser.Scene {
       if (this.holding) this.tryAttach()
     }
 
+    // Remember where the character was before this frame's movement so banana
+    // pickups can sweep the full path travelled (no tunneling past fast).
+    const prevX = this.character.x
+    const prevY = this.character.y
+
     if (this.state === MoveState.Flying) {
       this.vy += SWING_GRAVITY * dt
       this.character.x += this.vx * dt
@@ -1273,9 +1352,9 @@ export class GameScene extends Phaser.Scene {
       this.updateSwingDirection()
     }
 
-    // Sweep up any banana the character now overlaps (while in motion).
+    // Sweep up any banana along the path travelled this frame (while in motion).
     if (this.state === MoveState.Flying || this.state === MoveState.Swinging) {
-      this.checkBananaPickups()
+      this.checkBananaPickups(prevX, prevY)
     }
 
     this.drawRope()
