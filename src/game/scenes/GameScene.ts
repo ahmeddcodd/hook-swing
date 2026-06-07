@@ -42,7 +42,7 @@ const BAR_WOOD_THICKNESS = 0.09
 /** Horizontal screen position the camera keeps the character at, as a fraction of width. */
 const CHARACTER_SCREEN_X = 0.3
 /** How quickly the camera catches up to the player each frame (0–1; higher = snappier). */
-const CAM_FOLLOW_LERP = 0.12
+const CAM_FOLLOW_LERP = 0.15
 
 /** Per-background-layer parallax factor (index-matched to theme background[]).
  *  0 = static; higher = drifts faster with travel. Sky slow, hills a bit faster. */
@@ -54,19 +54,22 @@ const FALL_LIMIT = 200
 /**
  * Swing physics (custom pendulum — no engine). All in px and seconds.
  */
-const SWING_GRAVITY = 2200 // px/s² downward
+/** Swing-feel pass: a touch more gravity gives the pendulum real weight (a heavier
+ *  drop/whip through the bottom of the arc); the launch & release are bumped to
+ *  match so reach is preserved and the level stays beatable. */
+const SWING_GRAVITY = 2600 // px/s² downward (was 2200 — weightier arc)
 /** Initial launch velocity off the platform (the tap "jump"). */
 const LAUNCH_VX = 480 // px/s rightward
-const LAUNCH_VY = -1150 // px/s upward (arcs up into the hook band)
+const LAUNCH_VY = -1240 // px/s upward (raised to clear the hook band under heavier gravity)
 /** Grab the nearest circle within this distance (px) when holding. Generous so
  *  a tap while flying/falling reliably catches the nearest circle. */
 const GRAB_RADIUS = 460
-/** Per-frame energy retention while swinging (1 = none lost). Near-1 so the
- *  swing keeps its energy and can carry to the next circle. */
-const SWING_DAMPING = 0.9995
+/** Per-frame energy retention while swinging (1 = none lost). Slightly more bleed
+ *  than before so swings feel weighty rather than floaty/perpetual. */
+const SWING_DAMPING = 0.999
 /** Tangential speed multiplier on release — a slingshot so each release flings
- *  him far enough to reach the next circle. */
-const RELEASE_BOOST = 1.5
+ *  him far enough to reach the next circle. Bumped for a punchier, snappier whip. */
+const RELEASE_BOOST = 1.65
 
 /** On-screen thickness of the rope vine, as a fraction of screen width. */
 const ROPE_WIDTH = 0.06
@@ -76,6 +79,7 @@ const PARTICLE_KEY = 'juice-dot' // soft white dot, tinted per-burst
 /** Tints for the bursts. */
 const GRAB_TINT = 0x9be36b // leaf green — catching a vine hook
 const DUST_TINT = 0xddc9a0 // sandy dust — launch & landing puffs
+const BANANA_TINT = 0xffd83d // banana yellow — collecting a banana
 
 /** Character motion state. */
 const MoveState = {
@@ -103,6 +107,30 @@ const TEMPLE_GAP_X = 0.55
 const LAND_ANIM = 'character-land'
 const LAND_FPS = 8
 const LAND_BODY_HEIGHT = 0.16
+
+/** Scoring. */
+const SCORE_PER_HOOK = 100 // base points for grabbing a NEW hook
+const SCORE_COMBO_STEP = 0.5 // each chained hook adds +0.5x to the multiplier
+const SCORE_WIN_BONUS = 500 // bonus for landing on the temple
+const SCORE_PER_BANANA = 50 // bonus points for a collected banana
+const SCORE_PERFECT_BONUS = 1000 // bonus for collecting every banana in the level
+const BEST_SCORE_KEY = 'hookswing_best' // localStorage key
+
+/** Star-rating thresholds on the FINAL score (after all bonuses). 1 star = any
+ *  win; 2 and 3 stars reward higher scores (more hooks chained + bananas). */
+const STAR_2_SCORE = 2500
+const STAR_3_SCORE = 4000
+
+/** Collectible bananas (drawn at runtime, no art needed). Scattered through the
+ *  vertical band the player travels so they stay reachable. */
+const BANANA_COUNT = 10
+const BANANA_SIZE = 0.08 // on-screen height, fraction of screen width
+/** Vertical band (fraction of screen height) bananas spawn within — around the
+ *  hook rows / swing arcs so they're catchable. */
+const BANANA_Y_MIN = 0.4
+const BANANA_Y_MAX = 0.72
+/** Collect when the character's center comes within this distance (px). */
+const BANANA_COLLECT_RADIUS = 90
 
 /**
  * GameScene — the screen the player enters from the title.
@@ -149,6 +177,28 @@ export class GameScene extends Phaser.Scene {
   /** True while the "TRY AGAIN" fall flash is playing (before respawn). */
   private respawning = false
 
+  /** Scoring run-state. */
+  private score = 0
+  /** Number of hooks chained without falling — drives the combo multiplier. */
+  private comboCount = 0
+  /** Hooks already scored this run (re-grabbing one pays nothing). */
+  private scoredHooks = new Set<Phaser.GameObjects.Image>()
+  /** Collectible bananas scattered through the level (collected on overlap). */
+  private bananas: Phaser.GameObjects.Image[] = []
+  /** How many bananas collected this run (for the perfect-collect bonus + display). */
+  private bananasCollected = 0
+  /** Total bananas spawned this run (denominator for the perfect-collect check). */
+  private bananasTotal = 0
+  /** Live HUD: score (top-left) and combo multiplier (below it, hidden at 1x). */
+  private scoreText!: Phaser.GameObjects.Text
+  private comboText!: Phaser.GameObjects.Text
+
+  /** First-launch tutorial prompt objects (hand + label), torn down on launch. */
+  private tutorial: Phaser.GameObjects.GameObject[] = []
+  /** Session flag: the tutorial is shown once, not on every replay. Static so it
+   *  survives scene.restart() (which reuses the same instance but reruns create). */
+  private static tutorialSeen = false
+
   constructor() {
     super('GameScene')
   }
@@ -169,6 +219,13 @@ export class GameScene extends Phaser.Scene {
     this.restarting = false
     this.winOverlay = []
     this.respawning = false
+    this.score = 0
+    this.comboCount = 0
+    this.scoredHooks.clear()
+    this.bananas = []
+    this.bananasCollected = 0
+    this.bananasTotal = 0
+    this.tutorial = []
 
     // Background layers as screen-pinned TileSprites (scrollFactor 0). Each uses
     // a runtime [original|mirrored] texture so tiling is perfectly seamless (no
@@ -214,6 +271,23 @@ export class GameScene extends Phaser.Scene {
       )
     }
 
+    // Subtle idle bob so the hooks read as "alive" targets. Amplitude is tiny
+    // (a few px) and staggered per hook; purely cosmetic — the pendulum reads the
+    // hook's live position, but at this amplitude the swing feel is unaffected.
+    this.hooks.forEach((hook, i) => {
+      this.tweens.add({
+        targets: hook,
+        y: hook.y + 4,
+        duration: 1100,
+        ease: 'Sine.easeInOut',
+        yoyo: true,
+        repeat: -1,
+        delay: i * 120,
+      })
+    })
+
+    this.spawnBananas()
+
     // Goal temple at the far right, just past the last hook. Bottom-anchored on
     // the ground line. The character lands on its steps to win.
     const templeX = GAME_WIDTH * (HOOK_START_X + (HOOK_COUNT - 1) * HOOK_GAP_X + TEMPLE_GAP_X)
@@ -245,8 +319,15 @@ export class GameScene extends Phaser.Scene {
       .setDepth(6)
       .setVisible(false)
 
+    this.createHud()
+
     this.layout()
     this.scale.on('resize', this.layout, this)
+
+    // First-run onboarding hint (once per session).
+    if (!GameScene.tutorialSeen && this.state === MoveState.Idle) {
+      this.showTutorial()
+    }
 
     // Hold to swing: press launches off the platform (first time) and grabs;
     // release lets go with momentum.
@@ -284,6 +365,7 @@ export class GameScene extends Phaser.Scene {
 
   /** Leave the platform: play the jump launch animation and start free flight. */
   private launch() {
+    this.hideTutorial()
     this.sound.play(JungleTheme.assets.jumpSound.key)
     // Dust puff kicked up off the platform under his feet.
     this.burst(this.character.x, this.character.y, DUST_TINT, 10, 200)
@@ -324,15 +406,26 @@ export class GameScene extends Phaser.Scene {
     this.vy = 0
     this.rope.setVisible(false)
 
+    // Completion bonus + perfect-collect bonus (all bananas), then update the live
+    // HUD before the win overlay covers it.
+    this.score += SCORE_WIN_BONUS
+    if (this.bananasTotal > 0 && this.bananasCollected >= this.bananasTotal) {
+      this.score += SCORE_PERFECT_BONUS
+    }
+    this.scoreText.setText(String(this.score))
+
     const land = JungleTheme.assets.characterLand
     this.character.setOrigin(0.5, land.feetOriginY)
     this.character.setScale((GAME_HEIGHT * LAND_BODY_HEIGHT) / land.bodyHeight)
     this.character.setPosition(this.landingX, this.landingY)
     this.character.play(LAND_ANIM, true)
 
-    // Juice: touchdown dust at the feet + a brief camera shake for impact.
+    // Juice: touchdown dust at the feet + a brief camera shake for impact + a
+    // white screen flash and a win arpeggio.
     this.burst(this.landingX, this.landingY, DUST_TINT, 16, 260)
     this.cameras.main.shake(220, 0.008)
+    this.winFlash()
+    this.sfxWin()
     this.character.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => {
       this.setIdlePose()
       this.character.setPosition(this.landingX, this.landingY)
@@ -353,6 +446,10 @@ export class GameScene extends Phaser.Scene {
   private showWinOverlay() {
     this.won = true
 
+    // Commit the run's score to the persistent best before showing it.
+    this.commitBestScore()
+    const best = this.readBestScore()
+
     // Dim the scene behind the overlay (screen-pinned, above the world).
     const dim = this.add
       .rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT, 0x06210f, 0.62)
@@ -362,7 +459,7 @@ export class GameScene extends Phaser.Scene {
 
     // "YOU WIN!" headline — cartoon cream/gold fill with a dark outline.
     const title = this.add
-      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.3, 'YOU WIN!', {
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.2, 'YOU WIN!', {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '96px',
         color: '#ffe9a8',
@@ -374,9 +471,60 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(101)
 
+    // Star rating (1–3) based on the final score. Drawn at runtime; animated to
+    // pop in one-by-one for a satisfying reveal.
+    const earnedStars = this.starRating()
+    const stars = this.buildStarRow(GAME_WIDTH / 2, GAME_HEIGHT * 0.32, earnedStars)
+
+    // Score + bananas + best lines beneath the stars.
+    const scoreLine = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.43, `SCORE  ${this.score}`, {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '52px',
+        color: '#ffffff',
+        stroke: '#3a2410',
+        strokeThickness: 8,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+    const perfect = this.bananasTotal > 0 && this.bananasCollected >= this.bananasTotal
+    const bananaLine = this.add
+      .text(
+        GAME_WIDTH / 2,
+        GAME_HEIGHT * 0.48,
+        perfect
+          ? `ALL BANANAS!  +${SCORE_PERFECT_BONUS}`
+          : `BANANAS  ${this.bananasCollected}/${this.bananasTotal}`,
+        {
+          fontFamily: 'Arial Black, Arial, sans-serif',
+          fontSize: '34px',
+          color: perfect ? '#ffd83d' : '#ffffff',
+          stroke: '#3a2410',
+          strokeThickness: 6,
+          align: 'center',
+        }
+      )
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+    const bestLine = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.52, `BEST  ${best}`, {
+        fontFamily: 'Arial, sans-serif',
+        fontSize: '32px',
+        color: '#9be36b',
+        stroke: '#3a2410',
+        strokeThickness: 6,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+
     // Replay button — reuse the title's play-button art.
     const button = this.add
-      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.56, JungleTheme.assets.playButton.key)
+      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.64, JungleTheme.assets.playButton.key)
       .setScrollFactor(0)
       .setDepth(101)
       .setInteractive({ useHandCursor: true })
@@ -385,7 +533,7 @@ export class GameScene extends Phaser.Scene {
     button.on('pointerdown', this.replay, this)
 
     const caption = this.add
-      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.68, 'TAP TO PLAY AGAIN', {
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.74, 'TAP TO PLAY AGAIN', {
         fontFamily: 'Arial, sans-serif',
         fontSize: '34px',
         color: '#ffffff',
@@ -396,15 +544,15 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(101)
 
-    this.winOverlay = [dim, title, button, caption]
+    this.winOverlay = [dim, title, ...stars, scoreLine, bananaLine, bestLine, button, caption]
 
-    // Pop-in juice on the text + button.
-    for (const obj of [title, button, caption]) {
+    // Pop-in juice on the text + button (stars animate separately, see buildStarRow).
+    for (const obj of [title, scoreLine, bananaLine, bestLine, button, caption]) {
       obj.setAlpha(0)
     }
     const baseScale = button.scale
     this.tweens.add({
-      targets: [title, button, caption],
+      targets: [title, scoreLine, bananaLine, bestLine, button, caption],
       alpha: 1,
       duration: 250,
       ease: 'Quad.easeOut',
@@ -426,6 +574,87 @@ export class GameScene extends Phaser.Scene {
       repeat: -1,
       delay: 320,
     })
+  }
+
+  // --- Star rating ---------------------------------------------------------
+
+  /** Map the final score to a 1–3 star rating (a win is always at least 1 star). */
+  private starRating(): number {
+    if (this.score >= STAR_3_SCORE) return 3
+    if (this.score >= STAR_2_SCORE) return 2
+    return 1
+  }
+
+  /** Build a centered row of 3 stars (earned ones gold, the rest dimmed) and
+   *  pop them in one-by-one. Returns the star images for overlay cleanup. */
+  private buildStarRow(cx: number, cy: number, earned: number): Phaser.GameObjects.Image[] {
+    const key = this.buildStarTexture()
+    const size = GAME_WIDTH * 0.16
+    const gap = size * 1.1
+    const startX = cx - gap // 3 stars centered around cx
+    const out: Phaser.GameObjects.Image[] = []
+
+    for (let i = 0; i < 3; i++) {
+      const isEarned = i < earned
+      const star = this.add
+        .image(startX + i * gap, cy, key)
+        .setOrigin(0.5)
+        .setScrollFactor(0)
+        .setDepth(101)
+      star.setDisplaySize(size, size)
+      star.setTint(isEarned ? 0xffd83d : 0x4a5a3a) // gold vs. dim green-grey
+      out.push(star)
+
+      if (isEarned) {
+        // Pop each earned star in sequence (scale-bounce + a little sound).
+        const targetScale = star.scale
+        star.setScale(targetScale * 0.2)
+        this.tweens.add({
+          targets: star,
+          scale: targetScale,
+          duration: 280,
+          ease: 'Back.easeOut',
+          delay: 300 + i * 220,
+        })
+        this.time.delayedCall(300 + i * 220, () =>
+          this.playTone({ freq: 700 + i * 200, type: 'triangle', duration: 0.14, gain: 0.1 })
+        )
+      } else {
+        star.setAlpha(0)
+        this.tweens.add({ targets: star, alpha: 0.85, duration: 250, delay: 250 })
+      }
+    }
+    return out
+  }
+
+  /** Draw a 5-point star texture once (asset-free), tinted per-use. */
+  private buildStarTexture(): string {
+    const key = 'rating-star'
+    if (this.textures.exists(key)) return key
+
+    const size = 120
+    const cx = size / 2
+    const cy = size / 2
+    const outer = 56
+    const inner = 24
+    // 10 alternating outer/inner vertices, starting at the top point.
+    const points: Phaser.Math.Vector2[] = []
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? outer : inner
+      const a = -Math.PI / 2 + (i * Math.PI) / 5
+      points.push(new Phaser.Math.Vector2(cx + Math.cos(a) * r, cy + Math.sin(a) * r))
+    }
+
+    const g = this.make.graphics({ x: 0, y: 0 }, false)
+    g.fillStyle(0xffffff, 1) // white so per-use tints render true
+    g.fillPoints(points, true)
+    // Dark outline for cartoon readability.
+    g.lineStyle(6, 0x3a2410, 1)
+    g.strokePoints(points, true, true)
+
+    g.generateTexture(key, size, size)
+    g.destroy()
+    return key
   }
 
   /** Fade out and restart the level from scratch. */
@@ -511,6 +740,7 @@ export class GameScene extends Phaser.Scene {
     if (!hook) return
 
     this.attachedHook = hook
+    this.addScore(hook)
     const dx = this.character.x - hook.x
     const dy = this.character.y - hook.y
     this.ropeLen = Math.hypot(dx, dy)
@@ -534,6 +764,7 @@ export class GameScene extends Phaser.Scene {
     this.burst(hook.x, hook.y, GRAB_TINT, 12, 260)
     this.squashPop()
     this.popHook(hook)
+    this.sfxGrab()
   }
 
   /** Quick scale-bounce on a hook when grabbed. */
@@ -559,6 +790,7 @@ export class GameScene extends Phaser.Scene {
 
     // Juice: a small puff at the point of release.
     this.burst(this.character.x, this.character.y, GRAB_TINT, 8, 220)
+    this.sfxRelease()
 
     this.attachedHook = null
     this.setJumpPose(false) // hold the leap frame, don't replay the launch sequence
@@ -578,6 +810,421 @@ export class GameScene extends Phaser.Scene {
       }
     }
     return best
+  }
+
+  // --- Scoring -------------------------------------------------------------
+
+  /** Build the screen-pinned score + combo HUD. Depth 50 keeps it above the
+   *  world but below the win overlay (100) so it's covered when you win. */
+  private createHud() {
+    this.scoreText = this.add
+      .text(GAME_WIDTH * 0.5, GAME_HEIGHT * 0.045, '0', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '64px',
+        color: '#ffe9a8',
+        stroke: '#3a2410',
+        strokeThickness: 8,
+        align: 'center',
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0)
+      .setDepth(50)
+
+    this.comboText = this.add
+      .text(GAME_WIDTH * 0.5, GAME_HEIGHT * 0.115, '', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '40px',
+        color: '#9be36b',
+        stroke: '#3a2410',
+        strokeThickness: 6,
+        align: 'center',
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0)
+      .setDepth(50)
+      .setVisible(false)
+  }
+
+  // --- Tutorial ------------------------------------------------------------
+
+  /** First-run hint: a pulsing "TAP & HOLD TO SWING" label with a tapping hand,
+   *  anchored above the character (where the action starts). Torn down on the
+   *  first launch and never shown again this session. */
+  private showTutorial() {
+    const hx = this.character.x
+    const hy = this.character.y - GAME_HEIGHT * 0.30
+
+    const hand = this.add
+      .image(hx, hy, this.buildHandTexture())
+      .setOrigin(0.3, 0.1) // fingertip near the anchor point
+      .setDepth(40)
+    hand.setScale((GAME_WIDTH * 0.12) / hand.width)
+
+    const label = this.add
+      .text(hx, hy - GAME_HEIGHT * 0.06, 'TAP & HOLD\nTO SWING', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '40px',
+        color: '#ffffff',
+        stroke: '#3a2410',
+        strokeThickness: 7,
+        align: 'center',
+      })
+      .setOrigin(0.5, 1)
+      .setDepth(40)
+
+    this.tutorial = [hand, label]
+
+    // Tapping motion on the hand (down-press + scale pulse), looped.
+    const baseScale = hand.scale
+    this.tweens.add({
+      targets: hand,
+      y: hy + GAME_HEIGHT * 0.02,
+      scale: baseScale * 0.88,
+      duration: 520,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+    })
+    // Gentle alpha pulse on the label.
+    this.tweens.add({
+      targets: label,
+      alpha: { from: 1, to: 0.55 },
+      duration: 700,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+    })
+  }
+
+  /** Tear down the tutorial prompt (on first launch) and mark it seen. */
+  private hideTutorial() {
+    if (this.tutorial.length === 0) return
+    GameScene.tutorialSeen = true
+    const objs = this.tutorial
+    this.tutorial = []
+    this.tweens.add({
+      targets: objs,
+      alpha: 0,
+      duration: 200,
+      ease: 'Quad.easeOut',
+      onComplete: () => {
+        for (const o of objs) o.destroy()
+      },
+    })
+  }
+
+  /** Draw a simple cartoon pointing-hand texture once (asset-free), mirroring the
+   *  particle-texture pattern. Returns the texture key. */
+  private buildHandTexture(): string {
+    const key = 'tutorial-hand'
+    if (this.textures.exists(key)) return key
+
+    const w = 120
+    const h = 160
+    const g = this.make.graphics({ x: 0, y: 0 }, false)
+
+    // Cuff/forearm.
+    g.fillStyle(0x3a2410, 1)
+    g.fillRoundedRect(34, 96, 52, 60, 14)
+    // Fist (palm).
+    g.fillStyle(0xffe0bd, 1)
+    g.fillRoundedRect(28, 70, 64, 56, 20)
+    // Extended index finger pointing up.
+    g.fillStyle(0xffe0bd, 1)
+    g.fillRoundedRect(44, 8, 26, 78, 13)
+    // Thumb nub on the side.
+    g.fillStyle(0xffe0bd, 1)
+    g.fillCircle(30, 84, 16)
+    // Dark outline pass for cartoon readability.
+    g.lineStyle(5, 0x3a2410, 1)
+    g.strokeRoundedRect(28, 70, 64, 56, 20)
+    g.strokeRoundedRect(44, 8, 26, 78, 13)
+
+    g.generateTexture(key, w, h)
+    g.destroy()
+    return key
+  }
+
+  // --- Synth SFX (Web Audio, asset-free) -----------------------------------
+
+  /** The Web Audio context, exposed by Phaser's WebAudio sound manager. Undefined
+   *  under the HTML5 fallback or before the first user gesture unlocks audio. */
+  private audioCtx(): AudioContext | undefined {
+    return (this.sound as unknown as { context?: AudioContext }).context
+  }
+
+  /** Play a short synthesized tone with an attack/decay envelope and an optional
+   *  frequency slide. No-op if the audio context isn't available. */
+  private playTone(opts: {
+    freq: number
+    type?: OscillatorType
+    duration?: number
+    gain?: number
+    slideTo?: number
+    delay?: number
+  }) {
+    const ctx = this.audioCtx()
+    if (!ctx) return
+    const { freq, type = 'sine', duration = 0.12, gain = 0.12, slideTo, delay = 0 } = opts
+    const t0 = ctx.currentTime + delay
+
+    const osc = ctx.createOscillator()
+    const env = ctx.createGain()
+    osc.type = type
+    osc.frequency.setValueAtTime(freq, t0)
+    if (slideTo !== undefined) osc.frequency.exponentialRampToValueAtTime(slideTo, t0 + duration)
+
+    // Quick attack, smooth decay to silence.
+    env.gain.setValueAtTime(0.0001, t0)
+    env.gain.exponentialRampToValueAtTime(gain, t0 + 0.012)
+    env.gain.exponentialRampToValueAtTime(0.0001, t0 + duration)
+
+    osc.connect(env).connect(ctx.destination)
+    osc.start(t0)
+    osc.stop(t0 + duration + 0.02)
+  }
+
+  /** Bright pluck when grabbing a hook. */
+  private sfxGrab() {
+    this.playTone({ freq: 660, type: 'square', duration: 0.08, gain: 0.1 })
+  }
+
+  /** Upward whoosh when releasing. */
+  private sfxRelease() {
+    this.playTone({ freq: 320, slideTo: 720, type: 'sine', duration: 0.14, gain: 0.1 })
+  }
+
+  /** Rising blip on score — pitch climbs with the combo for a satisfying ladder. */
+  private sfxScore() {
+    const step = Math.min(this.comboCount, 12)
+    const freq = 520 * Math.pow(2, step / 12) // up a semitone-ish per chained hook
+    this.playTone({ freq, type: 'triangle', duration: 0.1, gain: 0.09 })
+  }
+
+  /** Three-note ascending arpeggio on win. */
+  private sfxWin() {
+    const notes = [523, 659, 784, 1047] // C5 E5 G5 C6
+    notes.forEach((freq, i) =>
+      this.playTone({ freq, type: 'triangle', duration: 0.16, gain: 0.11, delay: i * 0.11 })
+    )
+  }
+
+  /** Downward thud when falling. */
+  private sfxFail() {
+    this.playTone({ freq: 320, slideTo: 90, type: 'sawtooth', duration: 0.3, gain: 0.12 })
+  }
+
+  /** A quick white full-screen flash that fades out — punctuates the win. */
+  private winFlash() {
+    const flash = this.add
+      .rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT, 0xffffff, 0.7)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(99) // just under the win overlay's dim (100)
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 320,
+      ease: 'Quad.easeOut',
+      onComplete: () => flash.destroy(),
+    })
+  }
+
+  /** Award points for grabbing a NEW hook, ramping the combo multiplier. Re-grabs
+   *  of an already-scored hook pay nothing and don't touch the combo. */
+  private addScore(hook: Phaser.GameObjects.Image) {
+    if (this.scoredHooks.has(hook)) return
+    this.scoredHooks.add(hook)
+
+    this.comboCount++
+    const multiplier = 1 + (this.comboCount - 1) * SCORE_COMBO_STEP
+    const points = Math.floor(SCORE_PER_HOOK * multiplier)
+    this.score += points
+
+    this.scoreText.setText(String(this.score))
+    this.bumpScoreText()
+    this.updateComboHud()
+    this.popFloatingScore(hook.x, hook.y, points)
+    this.sfxScore()
+  }
+
+  /** Refresh the combo HUD (hidden at 1x, shown as "xN.N COMBO" above). */
+  private updateComboHud() {
+    const multiplier = 1 + (this.comboCount - 1) * SCORE_COMBO_STEP
+    if (this.comboCount <= 1) {
+      this.comboText.setVisible(false)
+      return
+    }
+    const label = Number.isInteger(multiplier) ? `${multiplier}` : multiplier.toFixed(1)
+    this.comboText.setText(`x${label} COMBO`).setVisible(true)
+  }
+
+  /** Quick scale-pop on the score readout when it changes (juice). */
+  private bumpScoreText() {
+    this.tweens.add({
+      targets: this.scoreText,
+      scale: { from: 1.25, to: 1 },
+      duration: 180,
+      ease: 'Back.easeOut',
+    })
+  }
+
+  /** Floating "+N" that rises and fades at a grabbed hook (world-space). */
+  private popFloatingScore(x: number, y: number, points: number) {
+    const label = this.add
+      .text(x, y, `+${points}`, {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '44px',
+        color: '#ffe9a8',
+        stroke: '#3a2410',
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setDepth(12) // above the character (11), matching the burst particles
+
+    this.tweens.add({
+      targets: label,
+      y: y - GAME_HEIGHT * 0.08,
+      alpha: { from: 1, to: 0 },
+      duration: 700,
+      ease: 'Quad.easeOut',
+      onComplete: () => label.destroy(),
+    })
+  }
+
+  // --- Collectible bananas -------------------------------------------------
+
+  /** Scatter bananas randomly across the level's horizontal span, within the
+   *  vertical band the player travels so they stay reachable. Each gently
+   *  spins/bobs to read as a pickup. */
+  private spawnBananas() {
+    const key = this.buildBananaTexture()
+    // Horizontal span: from the first hook to just past the last (where the
+    // action happens), with a little margin so none hide behind the temple.
+    const firstX = GAME_WIDTH * HOOK_START_X
+    const lastX = GAME_WIDTH * (HOOK_START_X + (HOOK_COUNT - 1) * HOOK_GAP_X)
+    const size = GAME_WIDTH * BANANA_SIZE
+
+    for (let i = 0; i < BANANA_COUNT; i++) {
+      const x = Phaser.Math.Between(firstX, lastX)
+      const y = Phaser.Math.Between(GAME_HEIGHT * BANANA_Y_MIN, GAME_HEIGHT * BANANA_Y_MAX)
+      const banana = this.add.image(x, y, key).setOrigin(0.5).setDepth(8) // above hooks(7), below character(11)
+      banana.setDisplaySize(size, size)
+      this.bananas.push(banana)
+
+      // Idle bob + slow rotation so it reads as a live collectible.
+      this.tweens.add({
+        targets: banana,
+        y: y + 8,
+        duration: 900,
+        ease: 'Sine.easeInOut',
+        yoyo: true,
+        repeat: -1,
+        delay: i * 90,
+      })
+      this.tweens.add({
+        targets: banana,
+        angle: 360,
+        duration: 4000,
+        ease: 'Linear',
+        repeat: -1,
+      })
+    }
+    this.bananasTotal = this.bananas.length
+  }
+
+  /** Collect any banana the character now overlaps. Iterates a copy-free reverse
+   *  loop so we can splice out collected ones safely. */
+  private checkBananaPickups() {
+    for (let i = this.bananas.length - 1; i >= 0; i--) {
+      const banana = this.bananas[i]
+      const d = Phaser.Math.Distance.Between(
+        this.character.x,
+        this.character.y,
+        banana.x,
+        banana.y
+      )
+      if (d <= BANANA_COLLECT_RADIUS) {
+        this.bananas.splice(i, 1)
+        this.collectBanana(banana)
+      }
+    }
+  }
+
+  /** Award banana points + juice, then remove it. */
+  private collectBanana(banana: Phaser.GameObjects.Image) {
+    this.score += SCORE_PER_BANANA
+    this.bananasCollected++
+    this.scoreText.setText(String(this.score))
+    this.bumpScoreText()
+
+    this.burst(banana.x, banana.y, BANANA_TINT, 10, 240)
+    this.popFloatingScore(banana.x, banana.y, SCORE_PER_BANANA)
+    this.sfxBanana()
+
+    // Quick pop-out, then destroy.
+    this.tweens.killTweensOf(banana)
+    this.tweens.add({
+      targets: banana,
+      scale: banana.scale * 1.6,
+      alpha: 0,
+      duration: 180,
+      ease: 'Quad.easeOut',
+      onComplete: () => banana.destroy(),
+    })
+  }
+
+  /** Bright two-note "pickup" chirp. */
+  private sfxBanana() {
+    this.playTone({ freq: 880, type: 'triangle', duration: 0.07, gain: 0.09 })
+    this.playTone({ freq: 1175, type: 'triangle', duration: 0.09, gain: 0.09, delay: 0.06 })
+  }
+
+  /** Draw a simple cartoon banana texture once (asset-free), mirroring the
+   *  particle/hand texture pattern. Returns the texture key. */
+  private buildBananaTexture(): string {
+    const key = 'collectible-banana'
+    if (this.textures.exists(key)) return key
+
+    const w = 120
+    const h = 120
+    const g = this.make.graphics({ x: 0, y: 0 }, false)
+
+    // Crescent banana: an outer yellow arc with an inner cut-out to leave a curve.
+    // Drawn as a thick arc stroke for a clean, readable crescent.
+    g.lineStyle(34, 0x3a2410, 1) // dark outline underlay
+    g.beginPath()
+    g.arc(60, 70, 44, Phaser.Math.DegToRad(20), Phaser.Math.DegToRad(160), false)
+    g.strokePath()
+    g.lineStyle(24, 0xffd83d, 1) // yellow body
+    g.beginPath()
+    g.arc(60, 70, 44, Phaser.Math.DegToRad(20), Phaser.Math.DegToRad(160), false)
+    g.strokePath()
+    // Brown stem nub at one tip.
+    g.fillStyle(0x3a2410, 1)
+    g.fillCircle(102, 60, 9)
+
+    g.generateTexture(key, w, h)
+    g.destroy()
+    return key
+  }
+
+  /** Persist the best score across replays (sandbox storage may be blocked). */
+  private commitBestScore() {
+    try {
+      const best = Math.max(this.score, this.readBestScore())
+      localStorage.setItem(BEST_SCORE_KEY, String(best))
+    } catch {
+      /* storage blocked in the playable sandbox — ignore */
+    }
+  }
+
+  private readBestScore(): number {
+    try {
+      return Number(localStorage.getItem(BEST_SCORE_KEY) ?? 0) || 0
+    } catch {
+      return 0
+    }
   }
 
   update(_time: number, delta: number) {
@@ -624,6 +1271,11 @@ export class GameScene extends Phaser.Scene {
       this.character.y = this.attachedHook.y + this.ropeLen * Math.cos(this.angle)
       // Face the swing direction, with a deadzone so it doesn't flip at the apex.
       this.updateSwingDirection()
+    }
+
+    // Sweep up any banana the character now overlaps (while in motion).
+    if (this.state === MoveState.Flying || this.state === MoveState.Swinging) {
+      this.checkBananaPickups()
     }
 
     this.drawRope()
@@ -867,6 +1519,11 @@ export class GameScene extends Phaser.Scene {
     this.vx = 0
     this.vy = 0
     this.rope.setVisible(false)
+
+    // A fall breaks the combo (score is kept — it's cumulative for the run).
+    this.comboCount = 0
+    this.updateComboHud()
+    this.sfxFail()
 
     // Screen-pinned red dim + "TRY AGAIN" caption (above the world).
     const dim = this.add
