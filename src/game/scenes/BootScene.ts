@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { GAME_WIDTH, GAME_HEIGHT } from '../config.ts'
 import { JungleTheme } from '../themes/jungle.ts'
+import * as Sdk from '../../yt/sdk.ts'
 
 /**
  * BootScene — loads the title-screen art with a minimal progress bar,
@@ -13,6 +14,10 @@ export class BootScene extends Phaser.Scene {
 
   preload() {
     this.createLoadingBar()
+
+    // Signal YouTube the moment the loading screen actually renders. firstFrameReady
+    // MUST precede gameReady (sent later, once the title screen is interactive).
+    this.events.once(Phaser.Scenes.Events.RENDER, () => Sdk.firstFrameReady())
 
     const {
       cover,

@@ -2,6 +2,8 @@ import Phaser from 'phaser'
 import { GAME_WIDTH, GAME_HEIGHT } from '../config.ts'
 import { JungleTheme } from '../themes/jungle.ts'
 import { LEVELS } from '../levels.ts'
+import * as Sdk from '../../yt/sdk.ts'
+import { progress, saveProgress } from '../save.ts'
 
 /**
  * Idle animation. The spritesheet is pre-aligned (every frame centered &
@@ -109,7 +111,6 @@ const SCORE_COMBO_STEP = 0.5 // each chained hook adds +0.5x to the multiplier
 const SCORE_WIN_BONUS = 500 // bonus for landing on the temple
 const SCORE_PER_BANANA = 50 // bonus points for a collected banana
 const SCORE_PERFECT_BONUS = 1000 // bonus for collecting every banana in the level
-const BEST_SCORE_KEY = 'hookswing_best' // localStorage key
 
 /** Star-rating thresholds on the FINAL score (after all bonuses). 1 star = any
  *  win; 2 and 3 stars reward higher scores (more hooks chained + bananas). */
@@ -191,12 +192,22 @@ export class GameScene extends Phaser.Scene {
   private scoreText!: Phaser.GameObjects.Text
   private comboText!: Phaser.GameObjects.Text
 
-  /** Campaign progression (static so it survives scene.restart()). currentLevel
-   *  indexes LEVELS; campaignScore is the running total carried across levels.
-   *  These two fields are the entire save-state — a future YouTube SDK can seed
-   *  them in one place (see loadProgress note in the plan). */
-  private static currentLevel = 0
-  private static campaignScore = 0
+  /** Campaign progression, backed by the cloud-save `progress` object so it both
+   *  survives scene.restart() AND persists across sessions via YouTube cloud save
+   *  (seeded once at boot by loadProgress(), saved at milestones). currentLevel
+   *  indexes LEVELS; campaignScore is the running total carried across levels. */
+  private static get currentLevel() {
+    return progress.level
+  }
+  private static set currentLevel(v: number) {
+    progress.level = v
+  }
+  private static get campaignScore() {
+    return progress.campaignScore
+  }
+  private static set campaignScore(v: number) {
+    progress.campaignScore = v
+  }
 
   /** First-launch tutorial prompt objects (hand + label), torn down on launch. */
   private tutorial: Phaser.GameObjects.GameObject[] = []
@@ -208,9 +219,12 @@ export class GameScene extends Phaser.Scene {
     super('GameScene')
   }
 
-  /** The active level's layout/difficulty config. */
+  /** The active level's layout/difficulty config. Clamps the index so a stale or
+   *  out-of-range cloud save (e.g. from a build with more levels) never yields
+   *  undefined — it just lands on the last valid level. */
   private get level() {
-    return LEVELS[GameScene.currentLevel]
+    const i = Phaser.Math.Clamp(GameScene.currentLevel, 0, LEVELS.length - 1)
+    return LEVELS[i]
   }
 
   create() {
@@ -428,8 +442,12 @@ export class GameScene extends Phaser.Scene {
       this.score += SCORE_PERFECT_BONUS
     }
     this.scoreText.setText(String(this.score))
-    // Persist the running total so the next level continues from here.
+    // Persist the running total so the next level continues from here, push the
+    // final score to YouTube, and roll it into the cloud-saved best/progress.
     GameScene.campaignScore = this.score
+    Sdk.sendScore(this.score)
+    progress.best = Math.max(this.score, progress.best)
+    saveProgress()
 
     const land = JungleTheme.assets.characterLand
     this.character.setOrigin(0.5, land.feetOriginY)
@@ -685,13 +703,15 @@ export class GameScene extends Phaser.Scene {
    *  the running total) and restart the scene to build it. */
   private advanceLevel() {
     GameScene.currentLevel = Math.min(GameScene.currentLevel + 1, LEVELS.length - 1)
+    saveProgress() // persist the new level/running score before rebuilding
     this.restartScene()
   }
 
-  /** Start a fresh campaign from level 1 with a clean score. */
+  /** Start a fresh campaign from level 1 with a clean score (best is retained). */
   private restartCampaign() {
     GameScene.currentLevel = 0
     GameScene.campaignScore = 0
+    saveProgress()
     this.restartScene()
   }
 
@@ -1014,6 +1034,9 @@ export class GameScene extends Phaser.Scene {
     slideTo?: number
     delay?: number
   }) {
+    // Respect YouTube's mute / paused state. This synth path bypasses Phaser's
+    // mixer, so game.sound.mute wouldn't catch it — gate on the shared flag.
+    if (!Sdk.getAudioAllowed()) return
     const ctx = this.audioCtx()
     if (!ctx) return
     const { freq, type = 'sine', duration = 0.12, gain = 0.12, slideTo, delay = 0 } = opts
@@ -1097,6 +1120,7 @@ export class GameScene extends Phaser.Scene {
     this.updateComboHud()
     this.popFloatingScore(hook.x, hook.y, points)
     this.sfxScore()
+    Sdk.sendScore(this.score)
   }
 
   /** Refresh the combo HUD (hidden at 1x, shown as "xN.N COMBO" above). */
@@ -1235,6 +1259,7 @@ export class GameScene extends Phaser.Scene {
     this.burst(banana.x, banana.y, BANANA_TINT, 10, 240)
     this.popFloatingScore(banana.x, banana.y, SCORE_PER_BANANA)
     this.sfxBanana()
+    Sdk.sendScore(this.score)
 
     // Quick pop-out, then destroy.
     this.tweens.killTweensOf(banana)
@@ -1283,22 +1308,15 @@ export class GameScene extends Phaser.Scene {
     return key
   }
 
-  /** Persist the best score across replays (sandbox storage may be blocked). */
+  /** Roll the run's final score into the cloud-saved best and persist progress.
+   *  (Cloud save is the only permitted mechanism — no localStorage.) */
   private commitBestScore() {
-    try {
-      const best = Math.max(this.score, this.readBestScore())
-      localStorage.setItem(BEST_SCORE_KEY, String(best))
-    } catch {
-      /* storage blocked in the playable sandbox — ignore */
-    }
+    progress.best = Math.max(this.score, progress.best)
+    saveProgress()
   }
 
   private readBestScore(): number {
-    try {
-      return Number(localStorage.getItem(BEST_SCORE_KEY) ?? 0) || 0
-    } catch {
-      return 0
-    }
+    return progress.best
   }
 
   update(_time: number, delta: number) {

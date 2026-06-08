@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { GAME_WIDTH, GAME_HEIGHT } from '../config.ts'
 import { JungleTheme } from '../themes/jungle.ts'
+import * as Sdk from '../../yt/sdk.ts'
 
 /** Vertical position of the play button as a fraction of screen height. */
 const BUTTON_Y_RATIO = 0.8
@@ -45,6 +46,10 @@ export class TitleScene extends Phaser.Scene {
       yoyo: true,
       repeat: -1,
     })
+
+    // The title screen is now fully interactive (cover + tappable button laid
+    // out) — tell YouTube the game is ready and remove its loading spinner.
+    Sdk.gameReady()
 
     // Whole-screen tap + button tap both start the game.
     this.input.on('pointerdown', this.handleTap, this)
