@@ -1254,8 +1254,10 @@ export class GameScene extends Phaser.Scene {
 
   /** Bright two-note "pickup" chirp. */
   private sfxBanana() {
-    this.playTone({ freq: 880, type: 'triangle', duration: 0.07, gain: 0.09 })
-    this.playTone({ freq: 1175, type: 'triangle', duration: 0.09, gain: 0.09, delay: 0.06 })
+    // Louder, brighter three-note rising sparkle so a pickup feels rewarding.
+    this.playTone({ freq: 880, type: 'triangle', duration: 0.07, gain: 0.22 })
+    this.playTone({ freq: 1175, type: 'triangle', duration: 0.08, gain: 0.22, delay: 0.05 })
+    this.playTone({ freq: 1568, type: 'triangle', duration: 0.1, gain: 0.2, delay: 0.1 })
   }
 
   /** Draw a simple cartoon banana texture once (asset-free), mirroring the
