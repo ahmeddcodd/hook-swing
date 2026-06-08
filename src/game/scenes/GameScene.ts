@@ -42,6 +42,11 @@ const CHARACTER_FOOT_SINK = 0.015
 /** On-screen thickness of the overhead bar's wood band, as a fraction of screen height. */
 const BAR_WOOD_THICKNESS = 0.09
 
+/** Safe horizontal inset (fraction of width) for screen-pinned edge text. ENVELOP
+ *  crops a slice off the left/right on devices taller than 9:16, so edge-anchored
+ *  HUD/tutorial text is kept this far in to stay fully visible on all devices. */
+const SAFE_INSET_X = 0.1
+
 /** Horizontal screen position the camera keeps the character at, as a fraction of width. */
 const CHARACTER_SCREEN_X = 0.3
 /** How quickly the camera catches up to the player each frame (0–1; higher = snappier). */
@@ -829,6 +834,7 @@ export class GameScene extends Phaser.Scene {
     this.burst(hook.x, hook.y, GRAB_TINT, 12, 260)
     this.squashPop()
     this.popHook(hook)
+    this.sfxAttach()
   }
 
   /** Quick scale-bounce on a hook when grabbed. */
@@ -918,7 +924,7 @@ export class GameScene extends Phaser.Scene {
     // Level indicator, top-left. Vertically centered with the score line (score
     // origin is top, so add ~half its line height) so the two read as one row.
     this.add
-      .text(GAME_WIDTH * 0.04, hudTopY + GAME_HEIGHT * 0.012, `LEVEL ${GameScene.currentLevel + 1}`, {
+      .text(GAME_WIDTH * SAFE_INSET_X, hudTopY + GAME_HEIGHT * 0.012, `LEVEL ${GameScene.currentLevel + 1}`, {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '34px',
         color: '#ffffff',
@@ -936,11 +942,13 @@ export class GameScene extends Phaser.Scene {
    *  character (where the action starts). Torn down on the first launch and
    *  never shown again this session. */
   private showTutorial() {
-    const hx = this.character.x
-    const hy = this.character.y - GAME_HEIGHT * 0.30
+    // Horizontally centered & screen-pinned (scrollFactor 0) so the wide label
+    // never clips off the ENVELOP side-crop or drifts with the camera. Sits in
+    // the open sky above the character.
+    const hy = this.character.y - GAME_HEIGHT * 0.36
 
     const label = this.add
-      .text(hx, hy - GAME_HEIGHT * 0.06, 'TAP & HOLD\nTO SWING', {
+      .text(GAME_WIDTH * 0.5, hy, 'TAP & HOLD\nTO SWING', {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '40px',
         color: '#ffffff',
@@ -949,6 +957,7 @@ export class GameScene extends Phaser.Scene {
         align: 'center',
       })
       .setOrigin(0.5, 1)
+      .setScrollFactor(0)
       .setDepth(40)
 
     this.tutorial = [label]
@@ -1021,6 +1030,13 @@ export class GameScene extends Phaser.Scene {
     osc.connect(env).connect(ctx.destination)
     osc.start(t0)
     osc.stop(t0 + duration + 0.02)
+  }
+
+  /** Soft "catch" chirp when the rope locks onto a hook — a quick rising two-note
+   *  ping that reads as "attached" (distinct from the heavier jump/release SFX). */
+  private sfxAttach() {
+    this.playTone({ freq: 740, type: 'triangle', duration: 0.06, gain: 0.08 })
+    this.playTone({ freq: 1100, type: 'triangle', duration: 0.08, gain: 0.07, delay: 0.05 })
   }
 
   /** Rope-release sound when letting go of a hook. Cycles through the loaded

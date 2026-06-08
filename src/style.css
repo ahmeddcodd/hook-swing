@@ -24,10 +24,19 @@ body {
 }
 
 #game {
-  width: 100%;
+  /* Lock the game container to a 9:16 portrait box, sized as large as fits the
+     viewport. On portrait phones (~9:16) this fills the screen; on wide desktop
+     it stays a centered 9:16 frame (no stretching to fill the window). ENVELOP
+     then covers THIS box, so the game is always 9:16 on every device.
+     height-capped first; aspect-ratio derives width, and max-width keeps it from
+     overflowing on tall/narrow viewports. */
   height: 100%;
+  aspect-ratio: 9 / 16;
+  max-width: 100%;
   /* positioning context for the pause overlay */
   position: relative;
+  /* clip the canvas edges that ENVELOP scales beyond the viewport (no scroll) */
+  overflow: hidden;
 }
 
 #game canvas {

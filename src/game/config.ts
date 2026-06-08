@@ -14,8 +14,14 @@ export const gameConfig: Phaser.Types.Core.GameConfig = {
   height: GAME_HEIGHT,
   backgroundColor: '#000000',
   scale: {
-    mode: Phaser.Scale.FIT,
+    // ENVELOP scales the fixed 720×1280 design space to COVER the #game parent
+    // (no letterbox bars), cropping any slight overflow. The parent is locked to
+    // a 9:16 box in CSS (see style.css), so the game stays 9:16 on every device:
+    // it fills portrait phones and shows as a centered 9:16 frame on wide desktop.
+    mode: Phaser.Scale.ENVELOP,
     autoCenter: Phaser.Scale.CENTER_BOTH,
+    // Respect the CSS-sized #game box instead of forcing it to fill the window.
+    expandParent: false,
   },
   render: {
     antialias: true,
