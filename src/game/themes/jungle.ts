@@ -12,6 +12,15 @@ export const JungleTheme = {
     playButton: { key: 'play_button', path: 'game_ui/play_button.png' },
     // SFX played when the character launches off the starting platform.
     jumpSound: { key: 'jump_sound', path: 'sound_effects/jump_sound.ogg' },
+    // SFX played when the character releases the rope to fly off a hook. Several
+    // variants are cycled in order on successive releases so it doesn't get
+    // repetitive (see GameScene.sfxRelease).
+    ropeReleaseSounds: [
+      { key: 'rope_release_sound', path: 'sound_effects/rope_release_sound.mp3' },
+      { key: 'rope_release_sound_2', path: 'sound_effects/rope_release_sound_2.mp3' },
+      { key: 'rope_release_sound_3', path: 'sound_effects/rope_release_sound_3.mp3' },
+      { key: 'rope_release_sound_4', path: 'sound_effects/rope_release_sound_4.mp3' },
+    ],
     // Only layers 1 & 2 are background art. Layer 3 is reserved for the
     // gameplay foreground (player + hooks/vines), added in a later phase.
     background: [

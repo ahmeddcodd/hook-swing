@@ -77,6 +77,10 @@ const RELEASE_BOOST = 1.65
 /** On-screen thickness of the rope vine, as a fraction of screen width. */
 const ROPE_WIDTH = 0.06
 
+/** Playback volume for the rope-release SFX (the clips are louder than the jump
+ *  sound, so they're turned down to sit at a matching level). */
+const RELEASE_SFX_VOLUME = 0.6
+
 /** Visual-juice particle textures (generated at runtime, no art needed). */
 const PARTICLE_KEY = 'juice-dot' // soft white dot, tinted per-burst
 /** Tints for the bursts. */
@@ -163,6 +167,8 @@ export class GameScene extends Phaser.Scene {
   private angVel = 0 // rad/s
   /** Current swing animation direction (true = forward/travel direction). */
   private swingForward = true
+  /** Next rope-release SFX variant to play — cycles 0→1→2→3→0… per release. */
+  private releaseSfxIndex = 0
   /** World position the character starts (and respawns) at. */
   private startX = 0
   private startY = 0
@@ -239,6 +245,7 @@ export class GameScene extends Phaser.Scene {
     this.angle = 0
     this.angVel = 0
     this.swingForward = true
+    this.releaseSfxIndex = 0
     this.won = false
     this.restarting = false
     this.winOverlay = []
@@ -1016,9 +1023,12 @@ export class GameScene extends Phaser.Scene {
     osc.stop(t0 + duration + 0.02)
   }
 
-  /** Upward whoosh when releasing. */
+  /** Rope-release sound when letting go of a hook. Cycles through the loaded
+   *  variants in order so repeated releases don't sound identical. */
   private sfxRelease() {
-    this.playTone({ freq: 320, slideTo: 720, type: 'sine', duration: 0.14, gain: 0.1 })
+    const variants = JungleTheme.assets.ropeReleaseSounds
+    this.sound.play(variants[this.releaseSfxIndex].key, { volume: RELEASE_SFX_VOLUME })
+    this.releaseSfxIndex = (this.releaseSfxIndex + 1) % variants.length
   }
 
   /** Rising blip on score — pitch climbs with the combo for a satisfying ladder. */
