@@ -822,7 +822,6 @@ export class GameScene extends Phaser.Scene {
     this.burst(hook.x, hook.y, GRAB_TINT, 12, 260)
     this.squashPop()
     this.popHook(hook)
-    this.sfxGrab()
   }
 
   /** Quick scale-bounce on a hook when grabbed. */
@@ -875,8 +874,14 @@ export class GameScene extends Phaser.Scene {
   /** Build the screen-pinned score + combo HUD. Depth 50 keeps it above the
    *  world but below the win overlay (100) so it's covered when you win. */
   private createHud() {
+    // The overhead wooden bar occupies the top ~BAR_WOOD_THICKNESS of the screen,
+    // so the HUD is placed just BELOW it (in the open sky) to avoid overlapping
+    // the bar and reading as cramped.
+    const hudTopY = GAME_HEIGHT * (BAR_WOOD_THICKNESS + 0.03)
+
+    // Score: centered, sitting clear under the bar.
     this.scoreText = this.add
-      .text(GAME_WIDTH * 0.5, GAME_HEIGHT * 0.045, String(this.score), {
+      .text(GAME_WIDTH * 0.5, hudTopY, String(this.score), {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '64px',
         color: '#ffe9a8',
@@ -888,8 +893,9 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(50)
 
+    // Combo multiplier, just under the score.
     this.comboText = this.add
-      .text(GAME_WIDTH * 0.5, GAME_HEIGHT * 0.115, '', {
+      .text(GAME_WIDTH * 0.5, hudTopY + GAME_HEIGHT * 0.07, '', {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '40px',
         color: '#9be36b',
@@ -902,9 +908,10 @@ export class GameScene extends Phaser.Scene {
       .setDepth(50)
       .setVisible(false)
 
-    // Level indicator, top-left (score is centered, so this stays clear of it).
+    // Level indicator, top-left. Vertically centered with the score line (score
+    // origin is top, so add ~half its line height) so the two read as one row.
     this.add
-      .text(GAME_WIDTH * 0.04, GAME_HEIGHT * 0.05, `LEVEL ${GameScene.currentLevel + 1}`, {
+      .text(GAME_WIDTH * 0.04, hudTopY + GAME_HEIGHT * 0.012, `LEVEL ${GameScene.currentLevel + 1}`, {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '34px',
         color: '#ffffff',
@@ -918,18 +925,12 @@ export class GameScene extends Phaser.Scene {
 
   // --- Tutorial ------------------------------------------------------------
 
-  /** First-run hint: a pulsing "TAP & HOLD TO SWING" label with a tapping hand,
-   *  anchored above the character (where the action starts). Torn down on the
-   *  first launch and never shown again this session. */
+  /** First-run hint: a pulsing "TAP & HOLD TO SWING" label anchored above the
+   *  character (where the action starts). Torn down on the first launch and
+   *  never shown again this session. */
   private showTutorial() {
     const hx = this.character.x
     const hy = this.character.y - GAME_HEIGHT * 0.30
-
-    const hand = this.add
-      .image(hx, hy, this.buildHandTexture())
-      .setOrigin(0.3, 0.1) // fingertip near the anchor point
-      .setDepth(40)
-    hand.setScale((GAME_WIDTH * 0.12) / hand.width)
 
     const label = this.add
       .text(hx, hy - GAME_HEIGHT * 0.06, 'TAP & HOLD\nTO SWING', {
@@ -943,19 +944,8 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0.5, 1)
       .setDepth(40)
 
-    this.tutorial = [hand, label]
+    this.tutorial = [label]
 
-    // Tapping motion on the hand (down-press + scale pulse), looped.
-    const baseScale = hand.scale
-    this.tweens.add({
-      targets: hand,
-      y: hy + GAME_HEIGHT * 0.02,
-      scale: baseScale * 0.88,
-      duration: 520,
-      ease: 'Sine.easeInOut',
-      yoyo: true,
-      repeat: -1,
-    })
     // Gentle alpha pulse on the label.
     this.tweens.add({
       targets: label,
@@ -982,38 +972,6 @@ export class GameScene extends Phaser.Scene {
         for (const o of objs) o.destroy()
       },
     })
-  }
-
-  /** Draw a simple cartoon pointing-hand texture once (asset-free), mirroring the
-   *  particle-texture pattern. Returns the texture key. */
-  private buildHandTexture(): string {
-    const key = 'tutorial-hand'
-    if (this.textures.exists(key)) return key
-
-    const w = 120
-    const h = 160
-    const g = this.make.graphics({ x: 0, y: 0 }, false)
-
-    // Cuff/forearm.
-    g.fillStyle(0x3a2410, 1)
-    g.fillRoundedRect(34, 96, 52, 60, 14)
-    // Fist (palm).
-    g.fillStyle(0xffe0bd, 1)
-    g.fillRoundedRect(28, 70, 64, 56, 20)
-    // Extended index finger pointing up.
-    g.fillStyle(0xffe0bd, 1)
-    g.fillRoundedRect(44, 8, 26, 78, 13)
-    // Thumb nub on the side.
-    g.fillStyle(0xffe0bd, 1)
-    g.fillCircle(30, 84, 16)
-    // Dark outline pass for cartoon readability.
-    g.lineStyle(5, 0x3a2410, 1)
-    g.strokeRoundedRect(28, 70, 64, 56, 20)
-    g.strokeRoundedRect(44, 8, 26, 78, 13)
-
-    g.generateTexture(key, w, h)
-    g.destroy()
-    return key
   }
 
   // --- Synth SFX (Web Audio, asset-free) -----------------------------------
@@ -1056,11 +1014,6 @@ export class GameScene extends Phaser.Scene {
     osc.connect(env).connect(ctx.destination)
     osc.start(t0)
     osc.stop(t0 + duration + 0.02)
-  }
-
-  /** Bright pluck when grabbing a hook. */
-  private sfxGrab() {
-    this.playTone({ freq: 660, type: 'square', duration: 0.08, gain: 0.1 })
   }
 
   /** Upward whoosh when releasing. */
