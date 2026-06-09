@@ -43,11 +43,6 @@ const CHARACTER_FOOT_SINK = 0.015
 /** On-screen thickness of the overhead bar's wood band, as a fraction of screen height. */
 const BAR_WOOD_THICKNESS = 0.09
 
-/** Safe horizontal inset (fraction of width) for screen-pinned edge text. ENVELOP
- *  crops a slice off the left/right on devices taller than 9:16, so edge-anchored
- *  HUD/tutorial text is kept this far in to stay fully visible on all devices. */
-const SAFE_INSET_X = 0.1
-
 /** Horizontal screen position the camera keeps the character at, as a fraction of width. */
 const CHARACTER_SCREEN_X = 0.3
 /** How quickly the camera catches up to the player each frame (0–1; higher = snappier). */
@@ -1050,12 +1045,29 @@ export class GameScene extends Phaser.Scene {
   private createHud() {
     // The overhead wooden bar occupies the top ~BAR_WOOD_THICKNESS of the screen,
     // so the HUD is placed just BELOW it (in the open sky) to avoid overlapping
-    // the bar and reading as cramped.
-    const hudTopY = GAME_HEIGHT * (BAR_WOOD_THICKNESS + 0.03)
+    // the bar and reading as cramped. Stacked, centered: label → score → combo.
+    const hudTopY = GAME_HEIGHT * (BAR_WOOD_THICKNESS + 0.02)
 
-    // Score: centered, sitting clear under the bar.
+    // Top label (centered). Campaign shows the level; endless shows the best
+    // score to chase. Sits ABOVE the current score.
+    const cornerLabel =
+      this.mode === 'endless' ? `BEST ${progress.best}` : `LEVEL ${GameScene.currentLevel + 1}`
+    this.cornerText = this.add
+      .text(GAME_WIDTH * 0.5, hudTopY, cornerLabel, {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '34px',
+        color: '#ffffff',
+        stroke: '#3a2410',
+        strokeThickness: 6,
+        align: 'center',
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0)
+      .setDepth(50)
+
+    // Current score: centered, just below the label.
     this.scoreText = this.add
-      .text(GAME_WIDTH * 0.5, hudTopY, String(this.score), {
+      .text(GAME_WIDTH * 0.5, hudTopY + GAME_HEIGHT * 0.04, String(this.score), {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '64px',
         color: '#ffe9a8',
@@ -1069,7 +1081,7 @@ export class GameScene extends Phaser.Scene {
 
     // Combo multiplier, just under the score.
     this.comboText = this.add
-      .text(GAME_WIDTH * 0.5, hudTopY + GAME_HEIGHT * 0.07, '', {
+      .text(GAME_WIDTH * 0.5, hudTopY + GAME_HEIGHT * 0.11, '', {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '40px',
         color: '#9be36b',
@@ -1081,22 +1093,6 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(50)
       .setVisible(false)
-
-    // Top-left indicator. Campaign shows the level; endless shows the best score
-    // to chase. Vertically centered with the score line so they read as one row.
-    const cornerLabel =
-      this.mode === 'endless' ? `BEST ${progress.best}` : `LEVEL ${GameScene.currentLevel + 1}`
-    this.cornerText = this.add
-      .text(GAME_WIDTH * SAFE_INSET_X, hudTopY + GAME_HEIGHT * 0.012, cornerLabel, {
-        fontFamily: 'Arial Black, Arial, sans-serif',
-        fontSize: '34px',
-        color: '#ffffff',
-        stroke: '#3a2410',
-        strokeThickness: 6,
-      })
-      .setOrigin(0, 0)
-      .setScrollFactor(0)
-      .setDepth(50)
   }
 
   /** Hide the live HUD (score, combo, corner) — used when the game-over overlay
@@ -1404,7 +1400,7 @@ export class GameScene extends Phaser.Scene {
   /** Create one bobbing/spinning banana collectible at a world position. Shared
    *  by campaign scatter and endless generation. */
   private spawnBanana(x: number, y: number, seq: number): Phaser.GameObjects.Image {
-    const banana = this.add.image(x, y, this.buildBananaTexture()).setOrigin(0.5).setDepth(8)
+    const banana = this.add.image(x, y, JungleTheme.assets.banana.key).setOrigin(0.5).setDepth(8)
     banana.setDisplaySize(GAME_WIDTH * BANANA_SIZE, GAME_WIDTH * BANANA_SIZE)
     this.bananas.push(banana)
 
@@ -1516,35 +1512,6 @@ export class GameScene extends Phaser.Scene {
     this.playTone({ freq: 880, type: 'triangle', duration: 0.07, gain: 0.22 })
     this.playTone({ freq: 1175, type: 'triangle', duration: 0.08, gain: 0.22, delay: 0.05 })
     this.playTone({ freq: 1568, type: 'triangle', duration: 0.1, gain: 0.2, delay: 0.1 })
-  }
-
-  /** Draw a simple cartoon banana texture once (asset-free), mirroring the
-   *  particle/hand texture pattern. Returns the texture key. */
-  private buildBananaTexture(): string {
-    const key = 'collectible-banana'
-    if (this.textures.exists(key)) return key
-
-    const w = 120
-    const h = 120
-    const g = this.make.graphics({ x: 0, y: 0 }, false)
-
-    // Crescent banana: an outer yellow arc with an inner cut-out to leave a curve.
-    // Drawn as a thick arc stroke for a clean, readable crescent.
-    g.lineStyle(34, 0x3a2410, 1) // dark outline underlay
-    g.beginPath()
-    g.arc(60, 70, 44, Phaser.Math.DegToRad(20), Phaser.Math.DegToRad(160), false)
-    g.strokePath()
-    g.lineStyle(24, 0xffd83d, 1) // yellow body
-    g.beginPath()
-    g.arc(60, 70, 44, Phaser.Math.DegToRad(20), Phaser.Math.DegToRad(160), false)
-    g.strokePath()
-    // Brown stem nub at one tip.
-    g.fillStyle(0x3a2410, 1)
-    g.fillCircle(102, 60, 9)
-
-    g.generateTexture(key, w, h)
-    g.destroy()
-    return key
   }
 
   /** Roll the run's final score into the cloud-saved best and persist progress.

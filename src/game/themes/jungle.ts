@@ -48,6 +48,8 @@ export const JungleTheme = {
     },
     // The wooden ring hook the character ropes onto to swing. Square image.
     hook: { key: 'wooden_circle', path: 'platform/wooden_circle.png' },
+    // The collectible banana scattered through the level.
+    banana: { key: 'banana', path: 'platform/banana.png' },
     // The swing rope vine (724×2172, vertical, core centered, uniform → stretchable).
     // Drawn from the hook down to the character's hands while swinging.
     rope: { key: 'rope', path: 'platform/rope.png' },

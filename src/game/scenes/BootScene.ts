@@ -52,6 +52,7 @@ export class BootScene extends Phaser.Scene {
     this.load.image(platform.key, platform.path)
     this.load.image(JungleTheme.assets.overheadBar.key, JungleTheme.assets.overheadBar.path)
     this.load.image(JungleTheme.assets.hook.key, JungleTheme.assets.hook.path)
+    this.load.image(JungleTheme.assets.banana.key, JungleTheme.assets.banana.path)
     this.load.image(JungleTheme.assets.rope.key, JungleTheme.assets.rope.path)
     this.load.image(destination.key, destination.path)
     this.load.spritesheet(characterIdle.key, characterIdle.path, {
