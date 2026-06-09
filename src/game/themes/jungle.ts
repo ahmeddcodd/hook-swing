@@ -10,6 +10,9 @@ export const JungleTheme = {
   assets: {
     cover: { key: 'cover', path: 'game_ui/cover.png' },
     playButton: { key: 'play_button', path: 'game_ui/play_button.png' },
+    retryButton: { key: 'retry_button', path: 'game_ui/retry_button.png' },
+    campaignButton: { key: 'campaign_button', path: 'game_ui/campaign_button.png' },
+    endlessButton: { key: 'endless_button', path: 'game_ui/endless_button.png' },
     // SFX played when the character launches off the starting platform.
     jumpSound: { key: 'jump_sound', path: 'sound_effects/jump_sound.ogg' },
     // SFX played when the character releases the rope to fly off a hook. Several

@@ -223,10 +223,11 @@ export class GameScene extends Phaser.Scene {
   private bananasCollected = 0
   /** Total bananas spawned this run (denominator for the perfect-collect check). */
   private bananasTotal = 0
-  /** Live HUD: score (top-center) and combo multiplier (below it, hidden at 1x).
-   *  The level indicator is a static label set once in createHud(). */
+  /** Live HUD: score (top-center), combo multiplier (below it, hidden at 1x), and
+   *  the top-left corner label (LEVEL n / BEST n). */
   private scoreText!: Phaser.GameObjects.Text
   private comboText!: Phaser.GameObjects.Text
+  private cornerText!: Phaser.GameObjects.Text
 
   /** Campaign progression, backed by the cloud-save `progress` object so it both
    *  survives scene.restart() AND persists across sessions via YouTube cloud save
@@ -521,6 +522,9 @@ export class GameScene extends Phaser.Scene {
    *  last level it's a campaign-complete screen with PLAY AGAIN. */
   private showWinOverlay() {
     this.won = true
+    // Hide the live HUD so the score/combo/level don't bleed through the overlay
+    // (the result is shown cleanly on the win screen instead).
+    this.hideHud()
 
     // Commit the running campaign total to the persistent best before showing it.
     this.commitBestScore()
@@ -670,6 +674,9 @@ export class GameScene extends Phaser.Scene {
     this.vx = 0
     this.vy = 0
     this.rope.setVisible(false)
+    // Hide the live HUD so the score/combo/best don't bleed through the overlay
+    // (the result is shown cleanly on the game-over screen instead).
+    this.hideHud()
 
     // Commit best + push to YouTube + persist (best is the shared high score).
     progress.best = Math.max(this.score, progress.best)
@@ -724,26 +731,15 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(101)
 
-    // RETRY — reuse the play-button art; restarts a fresh endless run.
+    // RETRY — the dedicated retry-button art; restarts a fresh endless run.
     const retry = this.add
-      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.57, JungleTheme.assets.playButton.key)
+      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.57, JungleTheme.assets.retryButton.key)
       .setScrollFactor(0)
       .setDepth(101)
       .setInteractive({ useHandCursor: true })
     const retryScale = (GAME_WIDTH * 0.62) / retry.width
     retry.setScale(retryScale)
     retry.on('pointerdown', this.restartScene, this)
-    const retryLabel = this.add
-      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.57, 'RETRY', {
-        fontFamily: 'Arial Black, Arial, sans-serif',
-        fontSize: '40px',
-        color: '#ffffff',
-        stroke: '#3a2410',
-        strokeThickness: 6,
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(102)
 
     // MENU — back to mode select. A bordered text button (no art needed).
     const menuBtn = this.add
@@ -761,10 +757,10 @@ export class GameScene extends Phaser.Scene {
       .setInteractive({ useHandCursor: true })
     menuBtn.on('pointerdown', this.toMenu, this)
 
-    this.winOverlay = [dim, title, scoreLine, bestLine, retry, retryLabel, menuBtn]
+    this.winOverlay = [dim, title, scoreLine, bestLine, retry, menuBtn]
 
     // Pop-in juice (everything but the dim fades in).
-    const popIn = [title, scoreLine, bestLine, retry, retryLabel, menuBtn]
+    const popIn = [title, scoreLine, bestLine, retry, menuBtn]
     for (const obj of popIn) obj.setAlpha(0)
     this.tweens.add({
       targets: popIn,
@@ -1090,7 +1086,7 @@ export class GameScene extends Phaser.Scene {
     // to chase. Vertically centered with the score line so they read as one row.
     const cornerLabel =
       this.mode === 'endless' ? `BEST ${progress.best}` : `LEVEL ${GameScene.currentLevel + 1}`
-    this.add
+    this.cornerText = this.add
       .text(GAME_WIDTH * SAFE_INSET_X, hudTopY + GAME_HEIGHT * 0.012, cornerLabel, {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '34px',
@@ -1101,6 +1097,14 @@ export class GameScene extends Phaser.Scene {
       .setOrigin(0, 0)
       .setScrollFactor(0)
       .setDepth(50)
+  }
+
+  /** Hide the live HUD (score, combo, corner) — used when the game-over overlay
+   *  takes over so the live readouts don't bleed through behind it. */
+  private hideHud() {
+    this.scoreText.setVisible(false)
+    this.comboText.setVisible(false)
+    this.cornerText.setVisible(false)
   }
 
   // --- Tutorial ------------------------------------------------------------

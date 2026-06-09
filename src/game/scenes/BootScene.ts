@@ -33,6 +33,9 @@ export class BootScene extends Phaser.Scene {
     } = JungleTheme.assets
     this.load.image(cover.key, cover.path)
     this.load.image(playButton.key, playButton.path)
+    this.load.image(JungleTheme.assets.retryButton.key, JungleTheme.assets.retryButton.path)
+    this.load.image(JungleTheme.assets.campaignButton.key, JungleTheme.assets.campaignButton.path)
+    this.load.image(JungleTheme.assets.endlessButton.key, JungleTheme.assets.endlessButton.path)
 
     // Sound effects.
     this.load.audio(JungleTheme.assets.jumpSound.key, JungleTheme.assets.jumpSound.path)
