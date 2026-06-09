@@ -4,6 +4,7 @@ import { JungleTheme } from '../themes/jungle.ts'
 import { LEVELS } from '../levels.ts'
 import * as Sdk from '../../yt/sdk.ts'
 import { progress, saveProgress } from '../save.ts'
+import type { GameMode } from './MenuScene.ts'
 
 /**
  * Idle animation. The spritesheet is pre-aligned (every frame centered &
@@ -106,6 +107,23 @@ type MoveState = (typeof MoveState)[keyof typeof MoveState]
  *  spacing, heights) is per-level — see src/game/levels.ts. */
 const HOOK_SIZE = 0.16 // diameter, fraction of screen width
 
+/** Endless mode: hooks are generated ahead of the camera and culled behind it,
+ *  with difficulty ramping by distance. Ramp values extend the campaign's curve
+ *  (see src/game/levels.ts) and stay within reachable physics — playtest if a
+ *  segment ever feels unbeatable (lower GAP_MAX or raise GAP_RAMP_HOOKS). */
+const ENDLESS_LOOKAHEAD = 1.5 // screens of hooks kept spawned ahead of the camera
+const ENDLESS_CULL_MARGIN = 0.8 // screens behind the camera before an object is destroyed
+const ENDLESS_START_X = 0.9 // first hook x (fraction of width), matches LEVELS
+const ENDLESS_GAP_START = 0.62 // starting hook gap (matches LEVELS[0])
+const ENDLESS_GAP_MAX = 0.78 // hardest gap (just past LEVELS[4]'s 0.75)
+const ENDLESS_GAP_RAMP_HOOKS = 60 // hooks to reach GAP_MAX
+const ENDLESS_HIGH_Y_START = 0.5
+const ENDLESS_HIGH_Y_MAX = 0.42
+const ENDLESS_LOW_Y_START = 0.58
+const ENDLESS_LOW_Y_MAX = 0.64
+const ENDLESS_Y_JITTER = 0.03 // random row variance (scaled by ramp), fraction of height
+const ENDLESS_BANANA_CHANCE = 0.5 // fraction of hook segments that also spawn a banana
+
 /** Goal temple at the level end. */
 const TEMPLE_HEIGHT = 0.92 // on-screen height, fraction of screen height (tall temple)
 const TEMPLE_GROUND_Y = 1.02 // where the temple base sits, fraction of screen height (base off-screen)
@@ -151,7 +169,8 @@ export class GameScene extends Phaser.Scene {
   private platform!: Phaser.GameObjects.Image
   private overheadBar!: Phaser.GameObjects.TileSprite
   private hooks: Phaser.GameObjects.Image[] = []
-  private temple!: Phaser.GameObjects.Image
+  /** Goal temple — campaign only; undefined in endless mode (no finish line). */
+  private temple?: Phaser.GameObjects.Image
   /** World landing point on the temple steps. */
   private landingX = 0
   private landingY = 0
@@ -174,6 +193,12 @@ export class GameScene extends Phaser.Scene {
   private swingForward = true
   /** Next rope-release SFX variant to play — cycles 0→1→2→3→0… per release. */
   private releaseSfxIndex = 0
+  /** Active game mode (set in init()). Campaign = 5 fixed levels + temple finish;
+   *  endless = infinite generated run, fall ends the run. */
+  private mode: GameMode = 'campaign'
+  /** Endless generation cursor: x of the last spawned hook + running hook index. */
+  private lastHookX = 0
+  private hookIndex = 0
   /** World position the character starts (and respawns) at. */
   private startX = 0
   private startY = 0
@@ -226,8 +251,19 @@ export class GameScene extends Phaser.Scene {
    *  survives scene.restart() (which reuses the same instance but reruns create). */
   private static tutorialSeen = false
 
+  /** Authoritative mode across scene.restart() (Retry & campaign use bare
+   *  restarts). Mirrors tutorialSeen — set in init(), read as the fallback. */
+  private static currentMode: GameMode = 'campaign'
+
   constructor() {
     super('GameScene')
+  }
+
+  /** Receive the chosen mode from MenuScene (scene.start('GameScene', { mode })).
+   *  Falls back to the static (survives a bare scene.restart) then to campaign. */
+  init(data?: { mode?: GameMode }) {
+    this.mode = data?.mode ?? GameScene.currentMode ?? 'campaign'
+    GameScene.currentMode = this.mode
   }
 
   /** The active level's layout/difficulty config. Clamps the index so a stale or
@@ -255,10 +291,12 @@ export class GameScene extends Phaser.Scene {
     this.restarting = false
     this.winOverlay = []
     this.respawning = false
-    // Start from the running campaign total so the HUD continues across levels
-    // (reset to 0 only when a new campaign begins — see restartCampaign()).
-    this.score = GameScene.campaignScore
+    // Campaign carries the running total across levels; endless starts each run
+    // fresh at 0 (it never touches campaignScore).
+    this.score = this.mode === 'endless' ? 0 : GameScene.campaignScore
     this.comboCount = 0
+    this.hookIndex = 0
+    this.lastHookX = 0
     this.scoredHooks.clear()
     this.bananas = []
     this.bananasCollected = 0
@@ -297,45 +335,33 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(5)
 
-    // Pre-placed zig-zag chain of wooden circles ahead in the level, at fixed
-    // world positions. They come into view as the camera scrolls forward.
-    // Alternating high/low rows with horizontal gaps between them. Layout comes
-    // from the active level's config.
-    const level = this.level
     this.hooks = []
-    for (let i = 0; i < level.hookCount; i++) {
-      const x = GAME_WIDTH * (level.hookStartX + i * level.hookGapX)
-      const y = GAME_HEIGHT * (i % 2 === 0 ? level.hookHighY : level.hookLowY)
-      this.hooks.push(
-        this.add.image(x, y, JungleTheme.assets.hook.key).setOrigin(0.5).setDepth(7)
-      )
+    if (this.mode === 'endless') {
+      // Endless: hooks + bananas are generated ahead of the camera and culled
+      // behind it (see updateEndless). No temple — the run ends on a fall.
+      this.initEndlessGeneration()
+      this.templeWallX = Infinity // win-check can never fire in endless
+    } else {
+      // Campaign: pre-placed zig-zag chain of wooden circles at fixed world
+      // positions, from the active level's config. Alternating high/low rows.
+      const level = this.level
+      for (let i = 0; i < level.hookCount; i++) {
+        const x = GAME_WIDTH * (level.hookStartX + i * level.hookGapX)
+        const y = GAME_HEIGHT * (i % 2 === 0 ? level.hookHighY : level.hookLowY)
+        this.spawnHook(x, y, i)
+      }
+
+      this.spawnBananas()
+
+      // Goal temple at the far right, just past the last hook. Bottom-anchored on
+      // the ground line. The character lands on its steps to win.
+      const templeX =
+        GAME_WIDTH * (level.hookStartX + (level.hookCount - 1) * level.hookGapX + level.templeGapX)
+      this.temple = this.add
+        .image(templeX, GAME_HEIGHT * TEMPLE_GROUND_Y, JungleTheme.assets.destination.key)
+        .setOrigin(0.5, 1)
+        .setDepth(9)
     }
-
-    // Subtle idle bob so the hooks read as "alive" targets. Amplitude is tiny
-    // (a few px) and staggered per hook; purely cosmetic — the pendulum reads the
-    // hook's live position, but at this amplitude the swing feel is unaffected.
-    this.hooks.forEach((hook, i) => {
-      this.tweens.add({
-        targets: hook,
-        y: hook.y + 4,
-        duration: 1100,
-        ease: 'Sine.easeInOut',
-        yoyo: true,
-        repeat: -1,
-        delay: i * 120,
-      })
-    })
-
-    this.spawnBananas()
-
-    // Goal temple at the far right, just past the last hook. Bottom-anchored on
-    // the ground line. The character lands on its steps to win.
-    const templeX =
-      GAME_WIDTH * (level.hookStartX + (level.hookCount - 1) * level.hookGapX + level.templeGapX)
-    this.temple = this.add
-      .image(templeX, GAME_HEIGHT * TEMPLE_GROUND_Y, JungleTheme.assets.destination.key)
-      .setOrigin(0.5, 1)
-      .setDepth(9)
 
     // Platform anchored by its bottom-center so it sits flush on the ground.
     this.platform = this.add
@@ -479,10 +505,12 @@ export class GameScene extends Phaser.Scene {
     })
 
     // Smoothly pan the camera to center the temple on screen, then reveal the
-    // win overlay so the player can replay.
+    // win overlay so the player can replay. (land() only runs in campaign, where
+    // the temple always exists; fall back to the character x just in case.)
+    const focusX = this.temple ? this.temple.x : this.character.x
     this.tweens.add({
       targets: this.cameras.main,
-      scrollX: this.temple.x - GAME_WIDTH / 2,
+      scrollX: focusX - GAME_WIDTH / 2,
       duration: 600,
       ease: 'Sine.easeInOut',
       onComplete: () => this.showWinOverlay(),
@@ -629,6 +657,129 @@ export class GameScene extends Phaser.Scene {
     })
   }
 
+  /** Endless run ended (fell). Lock input, commit the score/best, and show a
+   *  GAME OVER screen with RETRY (new run) and MENU buttons. Modeled on
+   *  showWinOverlay()'s overlay/cleanup patterns. */
+  private showGameOver() {
+    this.won = true // reuses the existing input lock (onPointerDown/Up guard)
+    // Leave the active sim: stops Flying physics, camera follow, and endless
+    // generation (all gated on Flying/Swinging) so the world freezes behind the
+    // overlay — same mechanism the win path uses.
+    this.state = MoveState.Landing
+    this.holding = false
+    this.vx = 0
+    this.vy = 0
+    this.rope.setVisible(false)
+
+    // Commit best + push to YouTube + persist (best is the shared high score).
+    progress.best = Math.max(this.score, progress.best)
+    Sdk.sendScore(this.score)
+    saveProgress()
+    const best = progress.best
+
+    this.sfxFail()
+
+    const dim = this.add
+      .rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT, 0x210606, 0.66)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(100)
+
+    const title = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.24, 'GAME OVER', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '88px',
+        color: '#ffe9a8',
+        stroke: '#3a2410',
+        strokeThickness: 12,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+
+    const scoreLine = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.37, `SCORE  ${this.score}`, {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '52px',
+        color: '#ffffff',
+        stroke: '#3a2410',
+        strokeThickness: 8,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+
+    const bestLine = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.43, `BEST  ${best}`, {
+        fontFamily: 'Arial, sans-serif',
+        fontSize: '36px',
+        color: '#9be36b',
+        stroke: '#3a2410',
+        strokeThickness: 6,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+
+    // RETRY — reuse the play-button art; restarts a fresh endless run.
+    const retry = this.add
+      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.57, JungleTheme.assets.playButton.key)
+      .setScrollFactor(0)
+      .setDepth(101)
+      .setInteractive({ useHandCursor: true })
+    const retryScale = (GAME_WIDTH * 0.62) / retry.width
+    retry.setScale(retryScale)
+    retry.on('pointerdown', this.restartScene, this)
+    const retryLabel = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.57, 'RETRY', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '40px',
+        color: '#ffffff',
+        stroke: '#3a2410',
+        strokeThickness: 6,
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(102)
+
+    // MENU — back to mode select. A bordered text button (no art needed).
+    const menuBtn = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.69, 'MENU', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '40px',
+        color: '#ffe9a8',
+        stroke: '#3a2410',
+        strokeThickness: 8,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(101)
+      .setInteractive({ useHandCursor: true })
+    menuBtn.on('pointerdown', this.toMenu, this)
+
+    this.winOverlay = [dim, title, scoreLine, bestLine, retry, retryLabel, menuBtn]
+
+    // Pop-in juice (everything but the dim fades in).
+    const popIn = [title, scoreLine, bestLine, retry, retryLabel, menuBtn]
+    for (const obj of popIn) obj.setAlpha(0)
+    this.tweens.add({
+      targets: popIn,
+      alpha: 1,
+      duration: 250,
+      ease: 'Quad.easeOut',
+    })
+    this.tweens.add({
+      targets: retry,
+      scale: { from: retryScale * 0.7, to: retryScale },
+      duration: 320,
+      ease: 'Back.easeOut',
+    })
+  }
+
   // --- Star rating ---------------------------------------------------------
 
   /** Map the final score to a 1–3 star rating (a win is always at least 1 star). */
@@ -727,7 +878,9 @@ export class GameScene extends Phaser.Scene {
     this.restartScene()
   }
 
-  /** Shared fade-out → scene.restart() transition used by the win-overlay buttons. */
+  /** Shared fade-out → scene.restart() transition used by the win/game-over
+   *  buttons. Passes the current mode so a rebuilt scene stays in the same mode
+   *  (the static currentMode is the authoritative fallback). */
   private restartScene() {
     if (this.restarting) return
     this.restarting = true
@@ -737,7 +890,19 @@ export class GameScene extends Phaser.Scene {
     this.winOverlay = []
     this.cameras.main.fadeOut(200, 0, 0, 0)
     this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
-      this.scene.restart()
+      this.scene.restart({ mode: this.mode })
+    })
+  }
+
+  /** Fade out → return to the mode-select menu (endless game-over MENU button). */
+  private toMenu() {
+    if (this.restarting) return
+    this.restarting = true
+    for (const obj of this.winOverlay) obj.destroy()
+    this.winOverlay = []
+    this.cameras.main.fadeOut(200, 0, 0, 0)
+    this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      this.scene.start('MenuScene')
     })
   }
 
@@ -921,10 +1086,12 @@ export class GameScene extends Phaser.Scene {
       .setDepth(50)
       .setVisible(false)
 
-    // Level indicator, top-left. Vertically centered with the score line (score
-    // origin is top, so add ~half its line height) so the two read as one row.
+    // Top-left indicator. Campaign shows the level; endless shows the best score
+    // to chase. Vertically centered with the score line so they read as one row.
+    const cornerLabel =
+      this.mode === 'endless' ? `BEST ${progress.best}` : `LEVEL ${GameScene.currentLevel + 1}`
     this.add
-      .text(GAME_WIDTH * SAFE_INSET_X, hudTopY + GAME_HEIGHT * 0.012, `LEVEL ${GameScene.currentLevel + 1}`, {
+      .text(GAME_WIDTH * SAFE_INSET_X, hudTopY + GAME_HEIGHT * 0.012, cornerLabel, {
         fontFamily: 'Arial Black, Arial, sans-serif',
         fontSize: '34px',
         color: '#ffffff',
@@ -1146,44 +1313,131 @@ export class GameScene extends Phaser.Scene {
     })
   }
 
+  // --- Hooks ---------------------------------------------------------------
+
+  /** Create one wooden-circle hook at a world position with the subtle idle-bob
+   *  that reads it as a live target. Shared by campaign (fixed) and endless
+   *  (generated). `seq` staggers the bob; modulo keeps endless delays bounded. */
+  private spawnHook(x: number, y: number, seq: number): Phaser.GameObjects.Image {
+    const hook = this.add.image(x, y, JungleTheme.assets.hook.key).setOrigin(0.5).setDepth(7)
+    hook.setDisplaySize(GAME_WIDTH * HOOK_SIZE, GAME_WIDTH * HOOK_SIZE)
+    this.tweens.add({
+      targets: hook,
+      y: y + 4,
+      duration: 1100,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+      delay: (seq % 8) * 120,
+    })
+    this.hooks.push(hook)
+    return hook
+  }
+
+  // --- Endless generation --------------------------------------------------
+
+  /** Seed the endless run: populate the first screen + lookahead with hooks. */
+  private initEndlessGeneration() {
+    this.hookIndex = 0
+    // Place the cursor one easy gap before the first hook so the opening hook
+    // lands at ENDLESS_START_X.
+    this.lastHookX = GAME_WIDTH * (ENDLESS_START_X - ENDLESS_GAP_START)
+    while (this.lastHookX < GAME_WIDTH * ENDLESS_LOOKAHEAD) this.spawnNextHook()
+  }
+
+  /** Spawn the next hook in the endless chain, with gap/height ramping by
+   *  distance, and (sometimes) a banana on the same segment. */
+  private spawnNextHook() {
+    const i = this.hookIndex++
+    const t = Math.min(i / ENDLESS_GAP_RAMP_HOOKS, 1) // 0 → 1 difficulty ramp
+
+    const gap = Phaser.Math.Linear(ENDLESS_GAP_START, ENDLESS_GAP_MAX, t)
+    this.lastHookX += GAME_WIDTH * gap
+
+    const highY = Phaser.Math.Linear(ENDLESS_HIGH_Y_START, ENDLESS_HIGH_Y_MAX, t)
+    const lowY = Phaser.Math.Linear(ENDLESS_LOW_Y_START, ENDLESS_LOW_Y_MAX, t)
+    const jitter = (Math.random() * 2 - 1) * ENDLESS_Y_JITTER * t
+    const yFrac = Phaser.Math.Clamp((i % 2 === 0 ? highY : lowY) + jitter, 0.38, 0.68)
+
+    this.spawnHook(this.lastHookX, GAME_HEIGHT * yFrac, i)
+
+    if (Math.random() < ENDLESS_BANANA_CHANCE) {
+      // Bias the banana toward the swing arc between the two rows.
+      const by = GAME_HEIGHT * Phaser.Math.Clamp(yFrac + 0.06, BANANA_Y_MIN, BANANA_Y_MAX)
+      this.spawnBanana(this.lastHookX, by, i)
+    }
+  }
+
+  /** Per-frame endless driver: spawn ahead of the camera, cull far behind it.
+   *  Called from update() after the camera lerp so scrollX is current. */
+  private updateEndless() {
+    const scrollX = this.cameras.main.scrollX
+    while (this.lastHookX < scrollX + GAME_WIDTH * ENDLESS_LOOKAHEAD) this.spawnNextHook()
+
+    const cullX = scrollX - GAME_WIDTH * ENDLESS_CULL_MARGIN
+    for (let i = this.hooks.length - 1; i >= 0; i--) {
+      const h = this.hooks[i]
+      // Never cull the hook we're currently swinging on — it drives the pendulum.
+      if (h.x < cullX && h !== this.attachedHook) {
+        this.scoredHooks.delete(h)
+        this.tweens.killTweensOf(h)
+        h.destroy()
+        this.hooks.splice(i, 1)
+      }
+    }
+    for (let i = this.bananas.length - 1; i >= 0; i--) {
+      const b = this.bananas[i]
+      if (b.x < cullX) {
+        this.tweens.killTweensOf(b)
+        b.destroy()
+        this.bananas.splice(i, 1)
+      }
+    }
+  }
+
   // --- Collectible bananas -------------------------------------------------
+
+  /** Create one bobbing/spinning banana collectible at a world position. Shared
+   *  by campaign scatter and endless generation. */
+  private spawnBanana(x: number, y: number, seq: number): Phaser.GameObjects.Image {
+    const banana = this.add.image(x, y, this.buildBananaTexture()).setOrigin(0.5).setDepth(8)
+    banana.setDisplaySize(GAME_WIDTH * BANANA_SIZE, GAME_WIDTH * BANANA_SIZE)
+    this.bananas.push(banana)
+
+    // Idle bob + slow rotation so it reads as a live collectible.
+    this.tweens.add({
+      targets: banana,
+      y: y + 8,
+      duration: 900,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+      delay: (seq % 8) * 90,
+    })
+    this.tweens.add({
+      targets: banana,
+      angle: 360,
+      duration: 4000,
+      ease: 'Linear',
+      repeat: -1,
+    })
+    return banana
+  }
 
   /** Scatter bananas randomly across the level's horizontal span, within the
    *  vertical band the player travels so they stay reachable. Each gently
    *  spins/bobs to read as a pickup. */
   private spawnBananas() {
-    const key = this.buildBananaTexture()
     // Horizontal span: from the first hook to just past the last (where the
     // action happens), with a little margin so none hide behind the temple.
     const level = this.level
     const firstX = GAME_WIDTH * level.hookStartX
     const lastX = GAME_WIDTH * (level.hookStartX + (level.hookCount - 1) * level.hookGapX)
-    const size = GAME_WIDTH * BANANA_SIZE
 
     for (let i = 0; i < level.bananaCount; i++) {
       const x = Phaser.Math.Between(firstX, lastX)
       const y = Phaser.Math.Between(GAME_HEIGHT * BANANA_Y_MIN, GAME_HEIGHT * BANANA_Y_MAX)
-      const banana = this.add.image(x, y, key).setOrigin(0.5).setDepth(8) // above hooks(7), below character(11)
-      banana.setDisplaySize(size, size)
-      this.bananas.push(banana)
-
-      // Idle bob + slow rotation so it reads as a live collectible.
-      this.tweens.add({
-        targets: banana,
-        y: y + 8,
-        duration: 900,
-        ease: 'Sine.easeInOut',
-        yoyo: true,
-        repeat: -1,
-        delay: i * 90,
-      })
-      this.tweens.add({
-        targets: banana,
-        angle: 360,
-        duration: 4000,
-        ease: 'Linear',
-        repeat: -1,
-      })
+      this.spawnBanana(x, y, i)
     }
     this.bananasTotal = this.bananas.length
   }
@@ -1303,10 +1557,13 @@ export class GameScene extends Phaser.Scene {
   update(_time: number, delta: number) {
     const dt = delta / 1000
 
-    // Fell off the bottom → show a brief "TRY AGAIN" flash, then respawn.
+    // Fell off the bottom → campaign: "TRY AGAIN" flash + respawn; endless: game
+    // over. The `!this.won` guard stops endless re-triggering every frame (the
+    // character stays Flying below the limit until the overlay restarts/leaves).
     if (
       this.state === MoveState.Flying &&
       !this.respawning &&
+      !this.won &&
       this.character.y > GAME_HEIGHT + FALL_LIMIT
     ) {
       this.fail()
@@ -1368,6 +1625,9 @@ export class GameScene extends Phaser.Scene {
       cam.scrollX += (targetScrollX - cam.scrollX) * CAM_FOLLOW_LERP
     }
 
+    // Endless: generate hooks ahead of the (now-updated) camera and cull behind.
+    if (this.mode === 'endless') this.updateEndless()
+
     // Parallax: drift each background layer at its own factor relative to the
     // camera, so far (sky) moves slower than near (hills). Runs every frame.
     const scrollX = this.cameras.main.scrollX
@@ -1418,7 +1678,7 @@ export class GameScene extends Phaser.Scene {
     this.layoutBackground()
     this.layoutOverheadBar()
     this.layoutHooks()
-    this.layoutTemple()
+    if (this.temple) this.layoutTemple() // endless has no temple
     this.layoutStart()
   }
 
@@ -1430,16 +1690,18 @@ export class GameScene extends Phaser.Scene {
 
   /** Size the temple (by height) and compute the world landing point on its ledge. */
   private layoutTemple() {
+    const temple = this.temple
+    if (!temple) return // endless mode has no temple
     const dest = JungleTheme.assets.destination
-    const scale = (GAME_HEIGHT * TEMPLE_HEIGHT) / this.temple.height
-    this.temple.setScale(scale)
+    const scale = (GAME_HEIGHT * TEMPLE_HEIGHT) / temple.height
+    temple.setScale(scale)
 
     // Landing point = the steps' surface, from the measured ratios. Temple origin
     // is bottom-center, so convert image ratios to world coords around it.
-    const w = this.temple.displayWidth
-    const h = this.temple.displayHeight
-    const left = this.temple.x - w / 2
-    const top = this.temple.y - h
+    const w = temple.displayWidth
+    const h = temple.displayHeight
+    const left = temple.x - w / 2
+    const top = temple.y - h
     this.landingX = left + w * dest.landingXRatio
     this.landingY = top + h * dest.landingSurfaceRatio
     // Hard end wall at the temple's front entrance — he can't pass this x.
@@ -1590,8 +1852,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Return the character to the starting platform after a fall. */
-  /** Fell off the bottom: flash a brief "TRY AGAIN", then respawn at the start. */
+  /** Fell off the bottom. Endless: the run ends → game over. Campaign: flash a
+   *  brief "TRY AGAIN", then respawn at the start (score is kept). */
   private fail() {
+    if (this.mode === 'endless') {
+      this.showGameOver()
+      return
+    }
     this.respawning = true
     // Freeze the character so it doesn't keep falling behind the flash.
     this.vx = 0

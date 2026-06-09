@@ -113,8 +113,8 @@ export class TitleScene extends Phaser.Scene {
   private startGame() {
     this.cameras.main.fadeOut(250, 0, 0, 0)
     this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
-      // Enters the game screen. (LevelSelectScene will sit in between in a later phase.)
-      this.scene.start('GameScene')
+      // Enters the mode-select menu (CAMPAIGN vs ENDLESS).
+      this.scene.start('MenuScene')
     })
   }
 }

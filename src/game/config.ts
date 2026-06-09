@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { BootScene } from './scenes/BootScene.ts'
 import { TitleScene } from './scenes/TitleScene.ts'
+import { MenuScene } from './scenes/MenuScene.ts'
 import { GameScene } from './scenes/GameScene.ts'
 
 /** Portrait design resolution (matches the 9:16 art assets). */
@@ -27,5 +28,5 @@ export const gameConfig: Phaser.Types.Core.GameConfig = {
     antialias: true,
     roundPixels: false,
   },
-  scene: [BootScene, TitleScene, GameScene],
+  scene: [BootScene, TitleScene, MenuScene, GameScene],
 }
