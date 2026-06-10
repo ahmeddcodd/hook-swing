@@ -503,7 +503,7 @@ export class GameScene extends Phaser.Scene {
     // final score to YouTube, and roll it into the cloud-saved best/progress.
     GameScene.campaignScore = this.score
     Sdk.sendScore(this.score)
-    progress.best = Math.max(this.score, progress.best)
+    progress.bestCampaign = Math.max(this.score, progress.bestCampaign)
     saveProgress()
 
     const land = JungleTheme.assets.characterLand
