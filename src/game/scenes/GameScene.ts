@@ -130,6 +130,10 @@ const LAND_BODY_HEIGHT = 0.16
 /** Scoring. */
 const SCORE_PER_HOOK = 100 // base points for grabbing a NEW hook
 const SCORE_COMBO_STEP = 0.5 // each chained hook adds +0.5x to the multiplier
+/** Multiplier ceiling (hit at 9 chained hooks). The combo COUNTER keeps climbing,
+ *  but payouts stop growing here — otherwise endless scores inflate quadratically
+ *  with run length and BEST becomes unbeatable after one marathon run. */
+const SCORE_COMBO_MAX = 5
 const SCORE_WIN_BONUS = 500 // bonus for landing on the temple
 const SCORE_PER_BANANA = 50 // bonus points for a collected banana
 const SCORE_PERFECT_BONUS = 1000 // bonus for collecting every banana in the level
@@ -138,6 +142,12 @@ const SCORE_PERFECT_BONUS = 1000 // bonus for collecting every banana in the lev
  *  win; 2 and 3 stars reward higher scores (more hooks chained + bananas). */
 const STAR_2_SCORE = 2500
 const STAR_3_SCORE = 4000
+
+/** Combo fire mode: at this many chained hooks (the x3 multiplier) the game
+ *  visibly heats up — fiery combo text, a flame trail on the character, hotter
+ *  score blips — so holding a long chain feels valuable and breaking it hurts. */
+const FIRE_COMBO_COUNT = 5
+const FIRE_TINT = 0xff8c1a // flame orange — ignition burst + trail particles
 
 /** Collectible bananas (drawn at runtime, no art needed). Scattered through the
  *  vertical band the player travels so they stay reachable. Count is per-level
@@ -199,6 +209,13 @@ export class GameScene extends Phaser.Scene {
   private startY = 0
   /** Win-state: true once the level is completed (guards gameplay input). */
   private won = false
+  /** Once-per-run flag: the mid-run "NEW BEST!" celebration already fired. */
+  private newBestHit = false
+  /** Combo fire mode state: active flag, the flame trail emitter following the
+   *  character, and the pulse tween on the fiery combo text. */
+  private onFire = false
+  private fireTrail?: Phaser.GameObjects.Particles.ParticleEmitter
+  private firePulse?: Phaser.Tweens.Tween
   /** Guards against double-tapping the replay button into stacked restarts. */
   private restarting = false
   /** Screen-pinned overlay objects shown on win (cleaned up on restart). */
@@ -284,6 +301,11 @@ export class GameScene extends Phaser.Scene {
     this.swingForward = true
     this.releaseSfxIndex = 0
     this.won = false
+    this.newBestHit = false
+    // Fire-mode display objects died with the old scene; just clear the refs.
+    this.onFire = false
+    this.fireTrail = undefined
+    this.firePulse = undefined
     this.restarting = false
     this.winOverlay = []
     this.respawning = false
@@ -468,6 +490,7 @@ export class GameScene extends Phaser.Scene {
     this.vx = 0
     this.vy = 0
     this.rope.setVisible(false)
+    this.exitFireMode() // level done — the win overlay takes over from here
 
     // Completion bonus + perfect-collect bonus (all bananas), then update the live
     // HUD before the win overlay covers it.
@@ -669,11 +692,15 @@ export class GameScene extends Phaser.Scene {
     this.vx = 0
     this.vy = 0
     this.rope.setVisible(false)
+    this.exitFireMode()
     // Hide the live HUD so the score/combo/best don't bleed through the overlay
     // (the result is shown cleanly on the game-over screen instead).
     this.hideHud()
 
     // Commit best + push to YouTube + persist (best is the shared high score).
+    // Capture the pre-commit best so the overlay can highlight a new record —
+    // this also covers the first-ever record, which the mid-run guard skips.
+    const isRecord = this.score > progress.best
     progress.best = Math.max(this.score, progress.best)
     Sdk.sendScore(this.score)
     saveProgress()
@@ -713,18 +740,30 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(101)
 
+    // Best line — a fresh record gets the gold "NEW BEST!" treatment.
     const bestLine = this.add
-      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.43, `BEST  ${best}`, {
-        fontFamily: 'Arial, sans-serif',
-        fontSize: '36px',
-        color: '#9be36b',
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.43, isRecord ? `NEW BEST  ${best}!` : `BEST  ${best}`, {
+        fontFamily: isRecord ? 'Arial Black, Arial, sans-serif' : 'Arial, sans-serif',
+        fontSize: isRecord ? '44px' : '36px',
+        color: isRecord ? '#ffd83d' : '#9be36b',
         stroke: '#3a2410',
-        strokeThickness: 6,
+        strokeThickness: isRecord ? 8 : 6,
         align: 'center',
       })
       .setOrigin(0.5)
       .setScrollFactor(0)
       .setDepth(101)
+    if (isRecord) {
+      // Gentle attention pulse on the record line.
+      this.tweens.add({
+        targets: bestLine,
+        scale: { from: 1, to: 1.08 },
+        duration: 500,
+        ease: 'Sine.easeInOut',
+        yoyo: true,
+        repeat: -1,
+      })
+    }
 
     // RETRY — the dedicated retry-button art; restarts a fresh endless run.
     const retry = this.add
@@ -1103,6 +1142,14 @@ export class GameScene extends Phaser.Scene {
     this.cornerText.setVisible(false)
   }
 
+  /** Bring the live HUD back (after the "NEW BEST!" banner). Combo visibility is
+   *  conditional (hidden at 1x), so it's restored via updateComboHud(). */
+  private showHud() {
+    this.scoreText.setVisible(true)
+    this.cornerText.setVisible(true)
+    this.updateComboHud()
+  }
+
   // --- Tutorial ------------------------------------------------------------
 
   /** First-run hint: a pulsing "TAP & HOLD TO SWING" label anchored above the
@@ -1214,11 +1261,15 @@ export class GameScene extends Phaser.Scene {
     this.releaseSfxIndex = (this.releaseSfxIndex + 1) % variants.length
   }
 
-  /** Rising blip on score — pitch climbs with the combo for a satisfying ladder. */
+  /** Rising blip on score — pitch climbs with the combo for a satisfying ladder.
+   *  On fire, a quieter sawtooth layer doubles it for a hotter, edgier timbre. */
   private sfxScore() {
     const step = Math.min(this.comboCount, 12)
     const freq = 520 * Math.pow(2, step / 12) // up a semitone-ish per chained hook
     this.playTone({ freq, type: 'triangle', duration: 0.1, gain: 0.09 })
+    if (this.onFire) {
+      this.playTone({ freq, type: 'sawtooth', duration: 0.1, gain: 0.05 })
+    }
   }
 
   /** Three-note ascending arpeggio on win. */
@@ -1257,8 +1308,8 @@ export class GameScene extends Phaser.Scene {
     this.scoredHooks.add(hook)
 
     this.comboCount++
-    const multiplier = 1 + (this.comboCount - 1) * SCORE_COMBO_STEP
-    const points = Math.floor(SCORE_PER_HOOK * multiplier)
+    if (!this.onFire && this.comboCount >= FIRE_COMBO_COUNT) this.enterFireMode()
+    const points = Math.floor(SCORE_PER_HOOK * this.comboMultiplier())
     this.score += points
 
     this.scoreText.setText(String(this.score))
@@ -1267,17 +1318,138 @@ export class GameScene extends Phaser.Scene {
     this.popFloatingScore(hook.x, hook.y, points)
     this.sfxScore()
     Sdk.sendScore(this.score)
+    this.checkNewBest()
+  }
+
+  /** Fire the "NEW BEST!" celebration the first time an endless run's live score
+   *  passes the stored best. Presentation only — progress.best is still committed
+   *  at game over. Skipped on the very first run ever (best 0: no record to beat);
+   *  the game-over screen still highlights that first record. */
+  private checkNewBest() {
+    if (this.mode !== 'endless' || this.newBestHit) return
+    if (progress.best <= 0 || this.score <= progress.best) return
+    this.newBestHit = true
+
+    // Persistent signal for the rest of the run: the BEST label goes gold.
+    this.cornerText.setColor('#ffd83d')
+
+    // Gold burst at the character + a tiny shake + a quick rising fanfare
+    // (distinct from the win arpeggio).
+    this.burst(this.character.x, this.character.y, BANANA_TINT, 14, 280)
+    this.cameras.main.shake(150, 0.004)
+    const notes = [659, 880, 1319] // E5 A5 E6 — bright, short
+    notes.forEach((freq, i) =>
+      this.playTone({ freq, type: 'triangle', duration: 0.12, gain: 0.12, delay: i * 0.07 })
+    )
+
+    // Screen-pinned "NEW BEST!" pop; bounces in, holds, fades out — never blocks
+    // play. The live HUD steps aside while it shows (hidden on pop, restored on
+    // fade) so the banner owns the moment.
+    this.hideHud()
+    const label = this.add
+      .text(GAME_WIDTH * 0.5, GAME_HEIGHT * 0.24, 'NEW BEST!', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '64px',
+        color: '#ffd83d',
+        stroke: '#3a2410',
+        strokeThickness: 10,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(60) // above the HUD (50), below overlays (100)
+      .setScale(0.2)
+    this.tweens.add({
+      targets: label,
+      scale: 1,
+      duration: 320,
+      ease: 'Back.easeOut',
+    })
+    this.tweens.add({
+      targets: label,
+      alpha: 0,
+      delay: 1100,
+      duration: 300,
+      ease: 'Quad.easeOut',
+      onComplete: () => {
+        label.destroy()
+        // Don't bring the HUD back if a win/game-over overlay took over while
+        // the banner was up (those keep the HUD hidden behind them).
+        if (!this.won) this.showHud()
+      },
+    })
+  }
+
+  // --- Combo fire mode -------------------------------------------------------
+
+  /** Ignite fire mode (combo reached FIRE_COMBO_COUNT): fiery pulsing combo text,
+   *  a flame trail following the character, and an ignition burst + sizzle. */
+  private enterFireMode() {
+    this.onFire = true
+
+    // Combo text flares: orange-gold over a deep red-brown, with a live pulse.
+    this.comboText.setColor('#ffb13d')
+    this.comboText.setStroke('#7a1d06', 6)
+    this.firePulse = this.tweens.add({
+      targets: this.comboText,
+      scale: { from: 1, to: 1.12 },
+      duration: 360,
+      ease: 'Sine.easeInOut',
+      yoyo: true,
+      repeat: -1,
+    })
+
+    // Flame trail: small, short-lived embers shed behind the character. Depth 10
+    // tucks it just under the character (11) so the figure stays readable.
+    this.fireTrail = this.add.particles(0, 0, PARTICLE_KEY, {
+      tint: FIRE_TINT,
+      lifespan: 300,
+      frequency: 45,
+      speed: { min: 20, max: 70 },
+      angle: { min: 60, max: 120 }, // shed downward-ish, drifting off the arc
+      scale: { start: 0.45, end: 0 },
+      alpha: { start: 0.85, end: 0 },
+      gravityY: -120, // embers float up as they fade
+    })
+    this.fireTrail.setDepth(10)
+    this.fireTrail.startFollow(this.character)
+
+    // Ignition flourish: flame burst at the character + a rising sizzle.
+    this.burst(this.character.x, this.character.y, FIRE_TINT, 14, 280)
+    this.playTone({ freq: 220, slideTo: 880, type: 'sawtooth', duration: 0.18, gain: 0.08 })
+  }
+
+  /** Put the fire out (combo died): restore the calm green combo style, stop the
+   *  pulse, and remove the trail. Safe to call when not on fire. */
+  private exitFireMode() {
+    if (!this.onFire) return
+    this.onFire = false
+
+    this.firePulse?.remove()
+    this.firePulse = undefined
+    this.comboText.setScale(1)
+    this.comboText.setColor('#9be36b')
+    this.comboText.setStroke('#3a2410', 6)
+
+    this.fireTrail?.destroy()
+    this.fireTrail = undefined
   }
 
   /** Refresh the combo HUD (hidden at 1x, shown as "xN.N COMBO" above). */
   private updateComboHud() {
-    const multiplier = 1 + (this.comboCount - 1) * SCORE_COMBO_STEP
     if (this.comboCount <= 1) {
       this.comboText.setVisible(false)
       return
     }
+    const multiplier = this.comboMultiplier()
     const label = Number.isInteger(multiplier) ? `${multiplier}` : multiplier.toFixed(1)
     this.comboText.setText(`x${label} COMBO`).setVisible(true)
+  }
+
+  /** The current payout multiplier, capped at SCORE_COMBO_MAX. Single source for
+   *  both the score math and the HUD so they can never disagree. */
+  private comboMultiplier(): number {
+    return Math.min(1 + (this.comboCount - 1) * SCORE_COMBO_STEP, SCORE_COMBO_MAX)
   }
 
   /** Quick scale-pop on the score readout when it changes (juice). */
@@ -1493,6 +1665,7 @@ export class GameScene extends Phaser.Scene {
     this.popFloatingScore(banana.x, banana.y, SCORE_PER_BANANA)
     this.sfxBanana()
     Sdk.sendScore(this.score)
+    this.checkNewBest()
 
     // Quick pop-out, then destroy.
     this.tweens.killTweensOf(banana)
@@ -1838,6 +2011,7 @@ export class GameScene extends Phaser.Scene {
 
     // A fall breaks the combo (score is kept — it's cumulative for the run).
     this.comboCount = 0
+    this.exitFireMode()
     this.updateComboHud()
     this.sfxFail()
 
