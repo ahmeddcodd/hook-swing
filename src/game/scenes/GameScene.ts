@@ -700,11 +700,11 @@ export class GameScene extends Phaser.Scene {
     // Commit best + push to YouTube + persist (best is the shared high score).
     // Capture the pre-commit best so the overlay can highlight a new record —
     // this also covers the first-ever record, which the mid-run guard skips.
-    const isRecord = this.score > progress.best
-    progress.best = Math.max(this.score, progress.best)
+    const isRecord = this.score > progress.bestEndless
+    progress.bestEndless = Math.max(this.score, progress.bestEndless)
     Sdk.sendScore(this.score)
     saveProgress()
-    const best = progress.best
+    const best = progress.bestEndless
 
     this.sfxFail()
 
@@ -1090,7 +1090,7 @@ export class GameScene extends Phaser.Scene {
     // Top label (centered). Campaign shows the level; endless shows the best
     // score to chase. Sits ABOVE the current score.
     const cornerLabel =
-      this.mode === 'endless' ? `BEST ${progress.best}` : `LEVEL ${GameScene.currentLevel + 1}`
+      this.mode === 'endless' ? `BEST ${progress.bestEndless}` : `LEVEL ${GameScene.currentLevel + 1}`
     this.cornerText = this.add
       .text(GAME_WIDTH * 0.5, hudTopY, cornerLabel, {
         fontFamily: 'Arial Black, Arial, sans-serif',
@@ -1322,12 +1322,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   /** Fire the "NEW BEST!" celebration the first time an endless run's live score
-   *  passes the stored best. Presentation only — progress.best is still committed
+   *  passes the stored best. Presentation only — progress.bestEndless is committed
    *  at game over. Skipped on the very first run ever (best 0: no record to beat);
    *  the game-over screen still highlights that first record. */
   private checkNewBest() {
     if (this.mode !== 'endless' || this.newBestHit) return
-    if (progress.best <= 0 || this.score <= progress.best) return
+    if (progress.bestEndless <= 0 || this.score <= progress.bestEndless) return
     this.newBestHit = true
 
     // Persistent signal for the rest of the run: the BEST label goes gold.
@@ -1690,12 +1690,12 @@ export class GameScene extends Phaser.Scene {
   /** Roll the run's final score into the cloud-saved best and persist progress.
    *  (Cloud save is the only permitted mechanism — no localStorage.) */
   private commitBestScore() {
-    progress.best = Math.max(this.score, progress.best)
+    progress.bestCampaign = Math.max(this.score, progress.bestCampaign)
     saveProgress()
   }
 
   private readBestScore(): number {
-    return progress.best
+    return progress.bestCampaign
   }
 
   update(_time: number, delta: number) {

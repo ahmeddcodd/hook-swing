@@ -14,6 +14,13 @@
  */
 import * as Sdk from '../yt/sdk.ts'
 
+/** Save-format version stamp. v2 = trustworthy per-mode bests. Saves WITHOUT
+ *  this stamp (the original single-`best` format, and the transitional split
+ *  format that wrongly copied the shared best into bestCampaign) get a one-time
+ *  repair on load: all best values fold into the endless record and the
+ *  campaign best rebuilds from real campaign wins. */
+const SAVE_VERSION = 2
+
 export interface Progress {
   /** Best campaign total ever (drives the campaign win screen's BEST line). */
   bestCampaign: number
@@ -40,16 +47,28 @@ function readNum(v: unknown, fallback = 0): number {
 
 /** Load + parse cloud save into `progress`. Tolerant of empty/old/invalid data
  *  (MUST handle previous-version saves without errors) — falls back to defaults.
- *  Migrates the legacy single `best` field (pre mode-split saves) into BOTH
- *  per-mode bests so old records carry over. */
+ *  Unstamped saves (version < 2) get the one-time best-score repair described
+ *  at SAVE_VERSION; stamped saves are read as-is. */
 export async function loadProgress(): Promise<void> {
   const raw = await Sdk.loadData()
   if (!raw) return
   try {
-    const data = JSON.parse(raw) as Partial<Progress> & { best?: number }
-    const legacyBest = readNum(data.best)
-    progress.bestCampaign = Math.max(readNum(data.bestCampaign), legacyBest)
-    progress.bestEndless = Math.max(readNum(data.bestEndless), legacyBest)
+    const data = JSON.parse(raw) as Partial<Progress> & { best?: number; version?: number }
+    if (readNum(data.version) >= SAVE_VERSION) {
+      // Trustworthy per-mode bests — read directly.
+      progress.bestCampaign = readNum(data.bestCampaign)
+      progress.bestEndless = readNum(data.bestEndless)
+    } else {
+      // Pre-stamp save: the campaign field either didn't exist or holds a copy
+      // of the old shared best (endless-earned). Fold everything into endless
+      // and let the campaign best rebuild from genuine campaign wins.
+      progress.bestEndless = Math.max(
+        readNum(data.bestEndless),
+        readNum(data.bestCampaign),
+        readNum(data.best)
+      )
+      progress.bestCampaign = 0
+    }
     progress.level = readNum(data.level)
     progress.campaignScore = readNum(data.campaignScore)
   } catch {
@@ -57,7 +76,8 @@ export async function loadProgress(): Promise<void> {
   }
 }
 
-/** Persist the current `progress` to cloud save (best-effort). */
+/** Persist the current `progress` to cloud save (best-effort), stamped with the
+ *  current format version so future loads skip the legacy repair. */
 export function saveProgress(): void {
-  void Sdk.saveData(JSON.stringify(progress))
+  void Sdk.saveData(JSON.stringify({ version: SAVE_VERSION, ...progress }))
 }
