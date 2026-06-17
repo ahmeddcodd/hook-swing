@@ -223,6 +223,15 @@ export class GameScene extends Phaser.Scene {
   /** True while the "TRY AGAIN" fall flash is playing (before respawn). */
   private respawning = false
 
+  /** In-game home control: the bottom-left icon, its confirm-dialog objects, and
+   *  an open flag. NOT a pause — gameplay keeps running behind the dialog. */
+  private homeIcon?: Phaser.GameObjects.Image
+  private homeDialog: Phaser.GameObjects.GameObject[] = []
+  private homeConfirmOpen = false
+  /** One-shot guard: the press that hit a screen-pinned UI button is consumed by
+   *  the scene's pointer handlers so it doesn't ALSO launch/grab/release. */
+  private uiTapGuard = false
+
   /** Scoring run-state. */
   private score = 0
   /** Number of hooks chained without falling — drives the combo multiplier. */
@@ -309,6 +318,10 @@ export class GameScene extends Phaser.Scene {
     this.restarting = false
     this.winOverlay = []
     this.respawning = false
+    this.homeIcon = undefined
+    this.homeDialog = []
+    this.homeConfirmOpen = false
+    this.uiTapGuard = false
     // Campaign carries the running total across levels; endless starts each run
     // fresh at 0 (it never touches campaignScore).
     this.score = this.mode === 'endless' ? 0 : GameScene.campaignScore
@@ -405,6 +418,7 @@ export class GameScene extends Phaser.Scene {
       .setVisible(false)
 
     this.createHud()
+    this.createHomeIcon()
 
     this.layout()
     this.scale.on('resize', this.layout, this)
@@ -431,6 +445,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onPointerDown() {
+    // A press that hit a screen-pinned UI button (home icon / dialog) is consumed
+    // so it doesn't ALSO launch/grab. GameObject input fires before this
+    // scene-level handler, so the flag is already set when we check it. The flag
+    // stays set so the matching pointerUP is absorbed too (otherwise tapping the
+    // icon mid-swing would release the rope).
+    if (this.uiTapGuard) return
     // Ignore gameplay taps once the level is won (the win overlay owns input)
     // or while the fall flash is playing.
     if (this.won || this.respawning) return
@@ -441,6 +461,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   private onPointerUp() {
+    if (this.uiTapGuard) {
+      this.uiTapGuard = false // press complete — clear for the next real tap
+      return
+    }
     if (this.won || this.respawning) return
     this.holding = false
     if (this.state === MoveState.Swinging) {
@@ -540,6 +564,10 @@ export class GameScene extends Phaser.Scene {
    *  last level it's a campaign-complete screen with PLAY AGAIN. */
   private showWinOverlay() {
     this.won = true
+    // If the home confirm was open when the level completed, tear it down first
+    // and retire the home icon so neither lingers over the result overlay.
+    this.closeHomeConfirm()
+    this.homeIcon?.disableInteractive()
     // Hide the live HUD so the score/combo/level don't bleed through the overlay
     // (the result is shown cleanly on the win screen instead).
     this.hideHud()
@@ -693,6 +721,10 @@ export class GameScene extends Phaser.Scene {
     this.vy = 0
     this.rope.setVisible(false)
     this.exitFireMode()
+    // If the home confirm was open when the run ended, tear it down first and
+    // retire the home icon so neither lingers over the game-over overlay.
+    this.closeHomeConfirm()
+    this.homeIcon?.disableInteractive()
     // Hide the live HUD so the score/combo/best don't bleed through the overlay
     // (the result is shown cleanly on the game-over screen instead).
     this.hideHud()
@@ -930,6 +962,129 @@ export class GameScene extends Phaser.Scene {
     this.restarting = true
     for (const obj of this.winOverlay) obj.destroy()
     this.winOverlay = []
+    this.cameras.main.fadeOut(200, 0, 0, 0)
+    this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+      this.scene.start('MenuScene')
+    })
+  }
+
+  // --- In-game home control --------------------------------------------------
+
+  /** Bottom-left home icon. Tapping opens the GO HOME / STAY confirm. This is NOT
+   *  a pause — gameplay keeps running. The tap is consumed via uiTapGuard so it
+   *  doesn't also launch/grab. Depth 70 sits above the HUD but below result
+   *  overlays (100/101), which naturally cover it on win/game-over. */
+  private createHomeIcon() {
+    const icon = this.add
+      .image(GAME_WIDTH * 0.1, GAME_HEIGHT * 0.94, JungleTheme.assets.homeButton.key)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(70)
+      .setInteractive({ useHandCursor: true })
+    icon.setScale((GAME_WIDTH * 0.12) / icon.width)
+    icon.on('pointerdown', () => {
+      this.uiTapGuard = true
+      this.openHomeConfirm()
+    })
+    this.homeIcon = icon
+  }
+
+  /** Show the GO HOME / STAY confirm dialog. Gameplay continues live behind it
+   *  (no loop sleep, no YouTube pause, HUD stays visible). */
+  private openHomeConfirm() {
+    if (this.homeConfirmOpen || this.won || this.respawning) return
+    this.homeConfirmOpen = true
+
+    // Dim backdrop — interactive so taps over it are absorbed (don't swing), but
+    // it does NOT close the dialog (the choice must be explicit).
+    const dim = this.add
+      .rectangle(0, 0, GAME_WIDTH, GAME_HEIGHT, 0x06210f, 0.62)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(102)
+      .setInteractive()
+    dim.on('pointerdown', () => {
+      this.uiTapGuard = true
+    })
+
+    const heading = this.add
+      .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.34, 'LEAVE GAME?', {
+        fontFamily: 'Arial Black, Arial, sans-serif',
+        fontSize: '60px',
+        color: '#ffe9a8',
+        stroke: '#3a2410',
+        strokeThickness: 10,
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(103)
+
+    const goHome = this.add
+      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.5, JungleTheme.assets.homeTextButton.key)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(103)
+      .setInteractive({ useHandCursor: true })
+    const stay = this.add
+      .image(GAME_WIDTH / 2, GAME_HEIGHT * 0.63, JungleTheme.assets.stayButton.key)
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(103)
+      .setInteractive({ useHandCursor: true })
+    const goScale = (GAME_WIDTH * 0.55) / goHome.width
+    const stayScale = (GAME_WIDTH * 0.55) / stay.width
+    goHome.setScale(goScale)
+    stay.setScale(stayScale)
+    goHome.on('pointerdown', () => {
+      this.uiTapGuard = true
+      this.goHome()
+    })
+    stay.on('pointerdown', () => {
+      this.uiTapGuard = true
+      this.closeHomeConfirm()
+    })
+
+    this.homeDialog = [dim, heading, goHome, stay]
+
+    // Pop-in juice (mirrors the result overlays).
+    for (const obj of [heading, goHome, stay]) obj.setAlpha(0)
+    this.tweens.add({
+      targets: [heading, goHome, stay],
+      alpha: 1,
+      duration: 200,
+      ease: 'Quad.easeOut',
+    })
+    this.tweens.add({
+      targets: goHome,
+      scale: { from: goScale * 0.7, to: goScale },
+      duration: 260,
+      ease: 'Back.easeOut',
+    })
+    this.tweens.add({
+      targets: stay,
+      scale: { from: stayScale * 0.7, to: stayScale },
+      duration: 260,
+      ease: 'Back.easeOut',
+    })
+  }
+
+  /** Dismiss the confirm dialog and resume play (which never stopped). */
+  private closeHomeConfirm() {
+    if (!this.homeConfirmOpen) return
+    for (const obj of this.homeDialog) obj.destroy()
+    this.homeDialog = []
+    this.homeConfirmOpen = false
+  }
+
+  /** Confirmed GO HOME → fade out and return to the mode-select menu. Mirrors
+   *  toMenu(); leaving mid-run forfeits the run (no in-progress save). */
+  private goHome() {
+    if (this.restarting) return
+    this.restarting = true
+    for (const obj of this.homeDialog) obj.destroy()
+    this.homeDialog = []
+    this.homeConfirmOpen = false
     this.cameras.main.fadeOut(200, 0, 0, 0)
     this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
       this.scene.start('MenuScene')

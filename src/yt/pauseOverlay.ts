@@ -32,7 +32,6 @@ function ensureOverlay(): HTMLDivElement {
     <div class="pause-card">
       <div class="pause-icon"><span></span><span></span></div>
       <div class="pause-title">GAME PAUSED</div>
-      <div class="pause-sub">Resume from YouTube to continue</div>
     </div>
   `
 

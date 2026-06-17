@@ -13,6 +13,10 @@ export const JungleTheme = {
     retryButton: { key: 'retry_button', path: 'game_ui/retry_button.png' },
     campaignButton: { key: 'campaign_button', path: 'game_ui/campaign_button.png' },
     endlessButton: { key: 'endless_button', path: 'game_ui/endless_button.png' },
+    // In-game home icon + its confirm-dialog buttons (GO HOME / STAY).
+    homeButton: { key: 'home_button', path: 'game_ui/home_button.png' },
+    homeTextButton: { key: 'home_text_button', path: 'game_ui/home_text_button.png' },
+    stayButton: { key: 'stay_button', path: 'game_ui/stay_button.png' },
     // SFX played when the character launches off the starting platform.
     jumpSound: { key: 'jump_sound', path: 'sound_effects/jump_sound.ogg' },
     // SFX played when the character releases the rope to fly off a hook. Several
