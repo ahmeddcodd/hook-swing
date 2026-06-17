@@ -585,13 +585,15 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(100)
 
-    // Headline — final level reads "YOU WIN!" (campaign done); otherwise
-    // "LEVEL N COMPLETE!". Cartoon cream/gold fill with a dark outline.
-    const headline = isFinalLevel ? 'YOU WIN!' : `LEVEL ${GameScene.currentLevel + 1}\nCOMPLETE!`
+    // Headline — final level clearly reads "CAMPAIGN COMPLETE!" (whole game done);
+    // otherwise "LEVEL N COMPLETE!". Cartoon cream/gold fill with a dark outline.
+    const headline = isFinalLevel
+      ? 'CAMPAIGN\nCOMPLETE!'
+      : `LEVEL ${GameScene.currentLevel + 1}\nCOMPLETE!`
     const title = this.add
       .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.2, headline, {
         fontFamily: 'Arial Black, Arial, sans-serif',
-        fontSize: isFinalLevel ? '96px' : '72px',
+        fontSize: isFinalLevel ? '80px' : '72px',
         color: '#ffe9a8',
         stroke: '#3a2410',
         strokeThickness: 12,
@@ -605,6 +607,23 @@ export class GameScene extends Phaser.Scene {
     // pop in one-by-one for a satisfying reveal.
     const earnedStars = this.starRating()
     const stars = this.buildStarRow(GAME_WIDTH / 2, GAME_HEIGHT * 0.32, earnedStars)
+
+    // Campaign-complete subline (final level only) — makes it unmistakable that
+    // the whole game was cleared, not just another level.
+    const completeLine = isFinalLevel
+      ? this.add
+          .text(GAME_WIDTH / 2, GAME_HEIGHT * 0.38, `You cleared all ${LEVELS.length} levels!`, {
+            fontFamily: 'Arial, sans-serif',
+            fontSize: '30px',
+            color: '#ffd83d',
+            stroke: '#3a2410',
+            strokeThickness: 6,
+            align: 'center',
+          })
+          .setOrigin(0.5)
+          .setScrollFactor(0)
+          .setDepth(101)
+      : undefined
 
     // Score + bananas + best lines beneath the stars.
     const scoreLine = this.add
@@ -675,15 +694,17 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setDepth(101)
 
+    // The campaign-complete subline only exists on the final level.
+    const popIns = [title, scoreLine, bananaLine, bestLine, button, caption]
+    if (completeLine) popIns.push(completeLine)
     this.winOverlay = [dim, title, ...stars, scoreLine, bananaLine, bestLine, button, caption]
+    if (completeLine) this.winOverlay.push(completeLine)
 
     // Pop-in juice on the text + button (stars animate separately, see buildStarRow).
-    for (const obj of [title, scoreLine, bananaLine, bestLine, button, caption]) {
-      obj.setAlpha(0)
-    }
+    for (const obj of popIns) obj.setAlpha(0)
     const baseScale = button.scale
     this.tweens.add({
-      targets: [title, scoreLine, bananaLine, bestLine, button, caption],
+      targets: popIns,
       alpha: 1,
       duration: 250,
       ease: 'Quad.easeOut',
