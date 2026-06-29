@@ -318,6 +318,13 @@ export class GameScene extends Phaser.Scene {
     this.restarting = false
     this.winOverlay = []
     this.respawning = false
+    // Clear the temple reference from any previous run. scene.restart() reuses
+    // this instance, so a stale (campaign) temple would otherwise survive into an
+    // endless run — layout() would then call layoutTemple() and overwrite the
+    // endless `templeWallX = Infinity` with a finite, reachable wall, making the
+    // campaign "LEVEL COMPLETE" overlay fire in endless and bump the campaign
+    // level (cert bug HS_01). Campaign reassigns this in its create() branch.
+    this.temple = undefined
     this.homeIcon = undefined
     this.homeDialog = []
     this.homeConfirmOpen = false
